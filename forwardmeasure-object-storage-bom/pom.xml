@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.forwardmeasure.objectstorage</groupId>
+    <artifactId>forwardmeasure-object-storage-parent</artifactId>
+    <version>${revision}</version>
+  </parent>
+  <artifactId>forwardmeasure-object-storage-bom</artifactId>
+  <packaging>pom</packaging>
+  <name>ForwardMeasure Object Storage BOM</name>
+  <dependencyManagement>
+    <dependencies>
+      <dependency><groupId>${project.groupId}</groupId><artifactId>forwardmeasure-object-storage-api</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>${project.groupId}</groupId><artifactId>forwardmeasure-object-storage-core</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>${project.groupId}</groupId><artifactId>forwardmeasure-object-storage-s3</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>${project.groupId}</groupId><artifactId>forwardmeasure-object-storage-gcs</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>${project.groupId}</groupId><artifactId>forwardmeasure-object-storage-azure</artifactId><version>${project.version}</version></dependency>
+    </dependencies>
+  </dependencyManagement>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>flatten-maven-plugin</artifactId>
+        <configuration>
+          <flattenMode>bom</flattenMode>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
