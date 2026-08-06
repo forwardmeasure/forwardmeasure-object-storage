@@ -151,8 +151,8 @@ class S3StorageClientIntegrationTest {
             MinioTestContainer minio) {
         return new StorageConfigGroup() {
             @Override
-            public String defaultClient() {
-                return "evidence";
+            public Optional<String> defaultClient() {
+                return Optional.of("evidence");
             }
 
             @Override

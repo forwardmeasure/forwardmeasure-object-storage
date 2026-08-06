@@ -59,7 +59,12 @@ public class StorageClientRegistry implements AutoCloseable {
     }
 
     public StorageClient getDefault() {
-        return get(config.defaultClient());
+        String clientName = config.clientNameForScheme(null)
+                .orElseThrow(() -> StorageException.invalidRequest(
+                        null,
+                        "No default storage client configured",
+                        null));
+        return get(clientName);
     }
 
     public StorageClient getForUri(URI uri) {

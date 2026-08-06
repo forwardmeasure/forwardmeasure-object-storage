@@ -36,7 +36,7 @@ public interface StorageConfigGroup {
      *
      * datafabric.storage.default-client=evidence-store
      */
-    String defaultClient();
+    Optional<String> defaultClient();
 
     /**
      * Named storage client definitions.
@@ -109,25 +109,20 @@ public interface StorageConfigGroup {
      * method returns the configured default client.
      */
     default Optional<String> clientNameForScheme(String scheme) {
-        String fallback = trimToNull(defaultClient());
-
-        if (fallback == null) {
-            return Optional.empty();
+        if (scheme != null && !scheme.isBlank()) {
+            String lookupScheme = scheme.trim();
+            String clientName = Optional.ofNullable(schemeClients())
+                    .orElse(Map.of())
+                    .get(lookupScheme);
+            String resolved = trimToNull(clientName);
+            if (resolved != null) {
+                return Optional.of(resolved);
+            }
         }
-
-        if (scheme == null || scheme.isBlank()) {
-            return Optional.of(fallback);
-        }
-
-        String lookupScheme = scheme.trim();
-        String clientName = schemeClients().get(lookupScheme);
-        String resolved = trimToNull(clientName);
-
-        if (resolved == null) {
-            return Optional.of(fallback);
-        }
-
-        return Optional.of(resolved);
+        return Optional.ofNullable(defaultClient())
+                .orElse(Optional.empty())
+                .map(StorageConfigGroup::trimToNull)
+                .filter(value -> value != null);
     }
 
     private static boolean uriMatches(URI uri, String key) {

@@ -1,9 +1,11 @@
 package com.forwardmeasure.objectstorage.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class StorageConfigGroupTest {
@@ -38,11 +40,40 @@ class StorageConfigGroupTest {
                 .orElseThrow());
     }
 
+    @Test
+    void permitsNoDefaultClientAndFailsClosedForUnmappedSchemes() {
+        StorageConfigGroup configuration = new StorageConfigGroup() {
+            @Override
+            public Optional<String> defaultClient() {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, NamedStorageClientConfig> clients() {
+                return Map.of();
+            }
+
+            @Override
+            public Map<String, String> schemeClients() {
+                return Map.of("s3", "s3-client");
+            }
+
+            @Override
+            public Map<String, String> uriClients() {
+                return Map.of();
+            }
+        };
+
+        assertEquals("s3-client", configuration.clientNameForScheme("s3")
+                .orElseThrow());
+        assertTrue(configuration.clientNameForScheme("gs").isEmpty());
+    }
+
     private static StorageConfigGroup configuration() {
         return new StorageConfigGroup() {
             @Override
-            public String defaultClient() {
-                return "general";
+            public Optional<String> defaultClient() {
+                return Optional.of("general");
             }
 
             @Override
