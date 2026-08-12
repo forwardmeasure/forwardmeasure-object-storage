@@ -23,7 +23,7 @@ import java.util.Optional;
  *                       mounted under different
  *                       roots such as:
  *
- *                       datafabric.storage.*
+ *                       application.storage.*
  *                       entity-intelligence.storage.*
  *                       evidence.storage.*
  */
@@ -34,7 +34,7 @@ public interface StorageConfigGroup {
      *
      * Example:
      *
-     * datafabric.storage.default-client=evidence-store
+     * application.storage.default-client=evidence-store
      */
     Optional<String> defaultClient();
 
@@ -43,8 +43,8 @@ public interface StorageConfigGroup {
      *
      * Example:
      *
-     * datafabric.storage.clients.evidence-store.backend=gcs
-     * datafabric.storage.clients.s3-evidence-store.backend=s3
+     * application.storage.clients.evidence-store.backend=gcs
+     * application.storage.clients.s3-evidence-store.backend=s3
      */
     Map<String, NamedStorageClientConfig> clients();
 
@@ -53,10 +53,10 @@ public interface StorageConfigGroup {
      *
      * Example:
      *
-     * datafabric.storage.scheme-clients.gs=evidence-store
-     * datafabric.storage.scheme-clients.gcs=evidence-store
-     * datafabric.storage.scheme-clients.s3=s3-evidence-store
-     * datafabric.storage.scheme-clients.abfs=azure-evidence-store
+     * application.storage.scheme-clients.gs=evidence-store
+     * application.storage.scheme-clients.gcs=evidence-store
+     * application.storage.scheme-clients.s3=s3-evidence-store
+     * application.storage.scheme-clients.abfs=azure-evidence-store
      */
     Map<String, String> schemeClients();
 

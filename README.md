@@ -24,8 +24,7 @@ of Quarkus, Spring, Micronaut, and CDI.
 - `forwardmeasure-object-storage-azure` — Azure Blob Storage.
 - `forwardmeasure-object-storage-bom` — dependency-management entry point.
 
-This repository is derived from the storage-client implementation proven in
-ForwardMeasure Data Fabric and is maintained independently of any application.
+This repository is maintained independently of any application.
 
 ## Resource Identifiers
 
