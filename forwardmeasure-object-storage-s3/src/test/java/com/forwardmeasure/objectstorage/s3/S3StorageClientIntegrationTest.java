@@ -26,155 +26,155 @@ import org.junit.jupiter.api.Test;
 /** Exercises the complete S3 adapter against a real MinIO server. */
 class S3StorageClientIntegrationTest {
 
-    @Test
-    void supportsLifecycleStreamingRangesAndSignedCapabilities() throws Exception {
-        try (var minio = new MinioTestContainer().start();
-                var registry = new StorageClientRegistry(configurationGroup(minio))) {
-            var storage = registry.getForUri(
-                    URI.create("s3://object-storage-contract/tenant/evidence"));
-            assertSame(storage, registry.getDefault());
-            assertSame(storage, registry.getForScheme("s3"));
-            String bucket = "object-storage-contract";
-            String key = "tenant/evidence/document.txt";
-            byte[] content = "provider-neutral evidence".getBytes(StandardCharsets.UTF_8);
+  @Test
+  void supportsLifecycleStreamingRangesAndSignedCapabilities() throws Exception {
+    try (var minio = new MinioTestContainer().start();
+        var registry = new StorageClientRegistry(configurationGroup(minio))) {
+      var storage = registry.getForUri(URI.create("s3://object-storage-contract/tenant/evidence"));
+      assertSame(storage, registry.getDefault());
+      assertSame(storage, registry.getForScheme("s3"));
+      String bucket = "object-storage-contract";
+      String key = "tenant/evidence/document.txt";
+      byte[] content = "provider-neutral evidence".getBytes(StandardCharsets.UTF_8);
 
-            storage.createBucket(new StorageClient.CreateBucketRequest(
-                    bucket, Map.of("purpose", "contract-test"), Map.of()));
-            assertTrue(storage.bucketExists(bucket));
+      storage.createBucket(
+          new StorageClient.CreateBucketRequest(
+              bucket, Map.of("purpose", "contract-test"), Map.of()));
+      assertTrue(storage.bucketExists(bucket));
 
-            var stored = storage.putObject(StorageClient.PutObjectRequest.fromBytes(
-                    bucket,
-                    key,
-                    content,
-                    "text/plain",
-                    Map.of("tenant", "contract-test")));
-            assertEquals(bucket, stored.bucketName());
-            assertEquals(key, stored.key());
+      var stored =
+          storage.putObject(
+              StorageClient.PutObjectRequest.fromBytes(
+                  bucket, key, content, "text/plain", Map.of("tenant", "contract-test")));
+      assertEquals(bucket, stored.bucketName());
+      assertEquals(key, stored.key());
 
-            var head = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
-            assertEquals(content.length, head.size());
-            assertEquals("contract-test", head.userMetadata().get("tenant"));
+      var head = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
+      assertEquals(content.length, head.size());
+      assertEquals("contract-test", head.userMetadata().get("tenant"));
 
-            try (var object = storage.getObject(StorageClient.GetObjectRequest.of(bucket, key))) {
-                assertEquals("text/plain", object.metadata().contentType().orElseThrow());
-                assertArrayEquals(content, object.content().readAllBytes());
-            }
+      try (var object = storage.getObject(StorageClient.GetObjectRequest.of(bucket, key))) {
+        assertEquals("text/plain", object.metadata().contentType().orElseThrow());
+        assertArrayEquals(content, object.content().readAllBytes());
+      }
 
-            try (var range = storage.getObject(
-                    new StorageClient.GetObjectRequest(bucket, key, 9L, 15L))) {
-                assertEquals("neutral", new String(
-                        range.content().readAllBytes(), StandardCharsets.UTF_8));
-            }
+      try (var range =
+          storage.getObject(new StorageClient.GetObjectRequest(bucket, key, 9L, 15L))) {
+        assertEquals("neutral", new String(range.content().readAllBytes(), StandardCharsets.UTF_8));
+      }
 
-            String uploadKey = "tenant/evidence/signed.txt";
-            var putCapability = storage.presignPut(new StorageClient.PresignPutRequest(
-                    bucket, uploadKey, Duration.ofMinutes(5), "text/plain"));
-            var http = HttpClient.newHttpClient();
-            var put = http.send(
-                    request(putCapability)
-                            .PUT(HttpRequest.BodyPublishers.ofString("signed upload"))
-                            .build(),
-                    HttpResponse.BodyHandlers.discarding());
-            assertTrue(put.statusCode() >= 200 && put.statusCode() < 300);
+      String uploadKey = "tenant/evidence/signed.txt";
+      var putCapability =
+          storage.presignPut(
+              new StorageClient.PresignPutRequest(
+                  bucket, uploadKey, Duration.ofMinutes(5), "text/plain"));
+      var http = HttpClient.newHttpClient();
+      var put =
+          http.send(
+              request(putCapability)
+                  .PUT(HttpRequest.BodyPublishers.ofString("signed upload"))
+                  .build(),
+              HttpResponse.BodyHandlers.discarding());
+      assertTrue(put.statusCode() >= 200 && put.statusCode() < 300);
 
-            var getCapability = storage.presignGet(new StorageClient.PresignGetRequest(
-                    bucket, uploadKey, Duration.ofMinutes(5)));
-            var get = http.send(
-                    request(getCapability).GET().build(),
-                    HttpResponse.BodyHandlers.ofString());
-            assertEquals(200, get.statusCode());
-            assertEquals("signed upload", get.body());
+      var getCapability =
+          storage.presignGet(
+              new StorageClient.PresignGetRequest(bucket, uploadKey, Duration.ofMinutes(5)));
+      var get =
+          http.send(request(getCapability).GET().build(), HttpResponse.BodyHandlers.ofString());
+      assertEquals(200, get.statusCode());
+      assertEquals("signed upload", get.body());
 
-            assertEquals(2, storage.listObjects(
-                    StorageClient.ListObjectsRequest.of(bucket)).objects().size());
+      assertEquals(
+          2, storage.listObjects(StorageClient.ListObjectsRequest.of(bucket)).objects().size());
 
-            storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, key));
-            storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, uploadKey));
-            assertThrows(StorageException.class, () -> storage.headObject(
-                    new StorageClient.HeadObjectRequest(bucket, key)));
+      storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, key));
+      storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, uploadKey));
+      assertThrows(
+          StorageException.class,
+          () -> storage.headObject(new StorageClient.HeadObjectRequest(bucket, key)));
 
-            storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, true));
-            assertFalse(storage.bucketExists(bucket));
-        }
+      storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, true));
+      assertFalse(storage.bucketExists(bucket));
     }
+  }
 
-    private static NamedStorageClientConfig configuration(MinioTestContainer minio) {
-        return new NamedStorageClientConfig() {
-            @Override
-            public String backend() {
-                return "s3";
-            }
+  private static NamedStorageClientConfig configuration(MinioTestContainer minio) {
+    return new NamedStorageClientConfig() {
+      @Override
+      public String backend() {
+        return "s3";
+      }
 
-            @Override
-            public Optional<String> bucket() {
-                return Optional.empty();
-            }
+      @Override
+      public Optional<String> bucket() {
+        return Optional.empty();
+      }
 
-            @Override
-            public Optional<String> endpoint() {
-                return Optional.of(minio.hostEndpoint().toString());
-            }
+      @Override
+      public Optional<String> endpoint() {
+        return Optional.of(minio.hostEndpoint().toString());
+      }
 
-            @Override
-            public Optional<String> publicEndpoint() {
-                return Optional.of(minio.hostEndpoint().toString());
-            }
+      @Override
+      public Optional<String> publicEndpoint() {
+        return Optional.of(minio.hostEndpoint().toString());
+      }
 
-            @Override
-            public Optional<String> region() {
-                return Optional.of("us-east-1");
-            }
+      @Override
+      public Optional<String> region() {
+        return Optional.of("us-east-1");
+      }
 
-            @Override
-            public Optional<String> accessKey() {
-                return Optional.of(minio.accessKey());
-            }
+      @Override
+      public Optional<String> accessKey() {
+        return Optional.of(minio.accessKey());
+      }
 
-            @Override
-            public Optional<String> secretKey() {
-                return Optional.of(minio.secretKey());
-            }
+      @Override
+      public Optional<String> secretKey() {
+        return Optional.of(minio.secretKey());
+      }
 
-            @Override
-            public Optional<Boolean> pathStyleAccess() {
-                return Optional.of(true);
-            }
+      @Override
+      public Optional<Boolean> pathStyleAccess() {
+        return Optional.of(true);
+      }
 
-            @Override
-            public Map<String, String> properties() {
-                return Map.of();
-            }
-        };
-    }
+      @Override
+      public Map<String, String> properties() {
+        return Map.of();
+      }
+    };
+  }
 
-    private static StorageConfigGroup configurationGroup(
-            MinioTestContainer minio) {
-        return new StorageConfigGroup() {
-            @Override
-            public Optional<String> defaultClient() {
-                return Optional.of("evidence");
-            }
+  private static StorageConfigGroup configurationGroup(MinioTestContainer minio) {
+    return new StorageConfigGroup() {
+      @Override
+      public Optional<String> defaultClient() {
+        return Optional.of("evidence");
+      }
 
-            @Override
-            public Map<String, NamedStorageClientConfig> clients() {
-                return Map.of("evidence", configuration(minio));
-            }
+      @Override
+      public Map<String, NamedStorageClientConfig> clients() {
+        return Map.of("evidence", configuration(minio));
+      }
 
-            @Override
-            public Map<String, String> schemeClients() {
-                return Map.of("s3", "evidence");
-            }
+      @Override
+      public Map<String, String> schemeClients() {
+        return Map.of("s3", "evidence");
+      }
 
-            @Override
-            public Map<String, String> uriClients() {
-                return Map.of();
-            }
-        };
-    }
+      @Override
+      public Map<String, String> uriClients() {
+        return Map.of();
+      }
+    };
+  }
 
-    private static HttpRequest.Builder request(StorageClient.PresignedRequest capability) {
-        var builder = HttpRequest.newBuilder(capability.uri());
-        capability.requiredHeaders().forEach(builder::header);
-        return builder;
-    }
+  private static HttpRequest.Builder request(StorageClient.PresignedRequest capability) {
+    var builder = HttpRequest.newBuilder(capability.uri());
+    capability.requiredHeaders().forEach(builder::header);
+    return builder;
+  }
 }

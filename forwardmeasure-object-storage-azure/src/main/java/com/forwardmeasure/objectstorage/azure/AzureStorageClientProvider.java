@@ -6,13 +6,13 @@ import com.forwardmeasure.objectstorage.core.StorageClientProvider;
 
 public class AzureStorageClientProvider implements StorageClientProvider {
 
-    @Override
-    public String backend() {
-        return "azure";
-    }
+  @Override
+  public String backend() {
+    return "azure";
+  }
 
-    @Override
-    public StorageClient create(String clientName, NamedStorageClientConfig config) {
-        return new AzureStorageClient(config);
-    }
+  @Override
+  public StorageClient create(String clientName, NamedStorageClientConfig config) {
+    return new AzureStorageClient(config);
+  }
 }
