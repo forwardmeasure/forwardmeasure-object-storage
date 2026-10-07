@@ -91,6 +91,43 @@ class StorageConfigGroupTest {
     assertTrue(configuration.clientNameForScheme("gs").isEmpty());
   }
 
+  @Test
+  void hostSuffixAndPathMappingsRespectBoundariesAndOptionalDefaults() {
+    var configuration =
+        new StorageTestProvider.Configuration(
+            Optional.of(" default "),
+            Map.of(),
+            Map.of("mem", "scheme"),
+            Map.of("example.test/private/", "private", "mem://exact/", "exact", " ", "ignored"));
+    assertEquals(
+        "private",
+        configuration
+            .clientNameForUri(URI.create("mem://sub.example.test/private/file"))
+            .orElseThrow());
+    assertEquals(
+        "private",
+        configuration.clientNameForUri(URI.create("mem://example.test/private")).orElseThrow());
+    assertEquals(
+        "scheme",
+        configuration
+            .clientNameForUri(URI.create("mem://notexample.test/private/file"))
+            .orElseThrow());
+    assertEquals(
+        "scheme",
+        configuration.clientNameForUri(URI.create("mem://example.test/privateer")).orElseThrow());
+    assertEquals("exact", configuration.clientNameForUri(URI.create("mem://exact/")).orElseThrow());
+    assertEquals("default", configuration.clientNameForUri(null).orElseThrow());
+    assertEquals("default", configuration.clientNameForUri(URI.create("/relative")).orElseThrow());
+    assertEquals("default", configuration.clientNameForScheme(" ").orElseThrow());
+    assertEquals("scheme", configuration.clientNameForScheme(" mem ").orElseThrow());
+    var empty = new StorageTestProvider.Configuration(null, Map.of(), null, null);
+    assertTrue(empty.clientNameForUri(URI.create("mem://bucket/key")).isEmpty());
+    var blank =
+        new StorageTestProvider.Configuration(
+            Optional.of(" "), Map.of(), Map.of("mem", " "), Map.of("bucket", " "));
+    assertTrue(blank.clientNameForUri(URI.create("mem://bucket/key")).isEmpty());
+  }
+
   private static StorageConfigGroup configuration() {
     return new StorageConfigGroup() {
       @Override

@@ -19,9 +19,11 @@ package com.forwardmeasure.objectstorage.azure;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.forwardmeasure.objectstorage.StorageClient;
+import com.forwardmeasure.objectstorage.StorageException;
 import com.forwardmeasure.objectstorage.core.NamedStorageClientConfig;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -103,6 +105,112 @@ class AzureStorageClientIntegrationTest {
         storage.deleteObject(new StorageClient.DeleteObjectRequest(container, uploadKey));
         storage.deleteBucket(new StorageClient.DeleteBucketRequest(container, true));
         assertFalse(storage.bucketExists(container));
+      }
+    }
+  }
+
+  @Test
+  void paginatedListingsFilesStreamsAndRangeBoundariesPreserveObjects() throws Exception {
+    try (var azurite = azurite()) {
+      azurite.start();
+      try (var storage = new AzureStorageClient(configuration(azurite))) {
+        String bucket = "pagination-contract";
+        storage.createBucket(new StorageClient.CreateBucketRequest(bucket, null, null));
+        assertTrue(storage.getBucket(bucket).isPresent());
+        assertTrue(storage.listBuckets().stream().anyMatch(value -> value.name().equals(bucket)));
+        var file = java.nio.file.Files.createTempFile("azure-storage-contract", ".txt");
+        try {
+          java.nio.file.Files.writeString(file, "abcdef");
+          storage.putObject(
+              StorageClient.PutObjectRequest.fromPath(bucket, "a.txt", file, null, null));
+          try (var stream =
+              new java.io.ByteArrayInputStream("second".getBytes(StandardCharsets.UTF_8))) {
+            storage.putObject(
+                StorageClient.PutObjectRequest.fromStream(bucket, "b.txt", stream, 6, " ", null));
+          }
+        } finally {
+          java.nio.file.Files.deleteIfExists(file);
+        }
+        var first =
+            storage.listObjects(new StorageClient.ListObjectsRequest(bucket, "", null, 1, null));
+        assertEquals(1, first.objects().size());
+        assertTrue(first.isTruncated(), "A limited page must expose its continuation token");
+        var second =
+            storage.listObjects(
+                new StorageClient.ListObjectsRequest(
+                    bucket, null, null, 1, first.nextContinuationToken()));
+        assertEquals(1, second.objects().size());
+        assertFalse(first.objects().getFirst().key().equals(second.objects().getFirst().key()));
+        assertFalse(second.isTruncated());
+        storage.putObject(
+            StorageClient.PutObjectRequest.fromBytes(
+                bucket, "folder/deep.txt", new byte[] {1}, null, null));
+        assertEquals(
+            1,
+            storage
+                .listObjects(new StorageClient.ListObjectsRequest(bucket, "a", " ", 0, " "))
+                .objects()
+                .size());
+        assertEquals(
+            2,
+            storage
+                .listObjects(new StorageClient.ListObjectsRequest(bucket, null, "/", 0, null))
+                .objects()
+                .size());
+        try (var head =
+                storage.getObject(new StorageClient.GetObjectRequest(bucket, "a.txt", null, 2L));
+            var tail =
+                storage.getObject(new StorageClient.GetObjectRequest(bucket, "a.txt", 3L, null));
+            var full =
+                storage.getObject(
+                    new StorageClient.GetObjectRequest(bucket, "a.txt", 0L, Long.MAX_VALUE))) {
+          assertEquals(bucket, head.bucketName());
+          assertEquals("a.txt", head.key());
+          assertEquals("abc", new String(head.content().readAllBytes(), StandardCharsets.UTF_8));
+          assertEquals("def", new String(tail.content().readAllBytes(), StandardCharsets.UTF_8));
+          assertEquals("abcdef", new String(full.content().readAllBytes(), StandardCharsets.UTF_8));
+        }
+        assertEquals(
+            "CONFLICT",
+            assertThrows(
+                    StorageException.class,
+                    () ->
+                        storage.createBucket(
+                            new StorageClient.CreateBucketRequest(bucket, null, null)))
+                .code());
+        assertEquals(
+            "NOT_FOUND",
+            assertThrows(
+                    StorageException.class,
+                    () ->
+                        storage.headObject(new StorageClient.HeadObjectRequest(bucket, "missing")))
+                .code());
+        assertEquals(
+            "NOT_FOUND",
+            assertThrows(
+                    StorageException.class,
+                    () -> storage.getObject(StorageClient.GetObjectRequest.of(bucket, "missing")))
+                .code());
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, true));
+        assertTrue(storage.getBucket(bucket).isEmpty());
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, true));
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, false));
+        storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, "missing"));
+        assertEquals(
+            "NOT_FOUND",
+            assertThrows(
+                    StorageException.class,
+                    () -> storage.listObjects(StorageClient.ListObjectsRequest.of(bucket)))
+                .code());
+        assertEquals(
+            "NOT_FOUND",
+            assertThrows(
+                    StorageException.class,
+                    () ->
+                        storage.putObject(
+                            StorageClient.PutObjectRequest.fromBytes(
+                                bucket, "key", new byte[0], null, null)))
+                .code());
       }
     }
   }

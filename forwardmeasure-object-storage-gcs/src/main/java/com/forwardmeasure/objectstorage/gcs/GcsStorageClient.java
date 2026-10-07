@@ -51,6 +51,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -62,10 +63,17 @@ public final class GcsStorageClient implements StorageClient {
   private final Credentials creds;
 
   public GcsStorageClient(NamedStorageClientConfig config) {
+    this(config, buildStorage(config));
+  }
+
+  private GcsStorageClient(NamedStorageClientConfig config, StorageAndCreds sc) {
+    this(config, sc.storage(), sc.creds());
+  }
+
+  GcsStorageClient(NamedStorageClientConfig config, Storage storage, Credentials creds) {
     this.config = config;
-    StorageAndCreds sc = buildStorage(config);
-    this.storage = sc.storage();
-    this.creds = sc.creds();
+    this.storage = storage;
+    this.creds = creds;
   }
 
   @Override
@@ -263,18 +271,27 @@ public final class GcsStorageClient implements StorageClient {
               blob.getContentLanguage());
 
       ReadChannel channel = storage.reader(id);
+      try {
+        Long start = request.rangeStartInclusive();
+        Long end = request.rangeEndInclusive();
+        if (start != null && start > 0) {
+          channel.seek(start);
+        }
 
-      Long start = request.rangeStartInclusive();
-      Long end = request.rangeEndInclusive();
-      if (start != null && start > 0) {
-        channel.seek(start);
+        InputStream base = Channels.newInputStream(channel);
+        InputStream content =
+            (end == null) ? base : new BoundedInputStream(base, rangeLimit(start, end));
+
+        return new GcsStorageObject(
+            request.bucketName(), request.key(), metadata, channel, content);
+      } catch (Exception failure) {
+        try {
+          channel.close();
+        } catch (Exception cleanup) {
+          failure.addSuppressed(cleanup);
+        }
+        throw failure;
       }
-
-      InputStream base = Channels.newInputStream(channel);
-      InputStream content =
-          (end == null) ? base : new BoundedInputStream(base, rangeLimit(start, end));
-
-      return new GcsStorageObject(request.bucketName(), request.key(), metadata, channel, content);
 
     } catch (StorageException e) {
       throw e;
@@ -391,6 +408,10 @@ public final class GcsStorageClient implements StorageClient {
       List<SignUrlOption> options = new ArrayList<>();
       options.add(SignUrlOption.httpMethod(method));
       options.add(SignUrlOption.withV4Signature());
+      config
+          .publicEndpoint()
+          .ifPresent(
+              endpoint -> options.add(SignUrlOption.withHostName(signingEndpoint(endpoint))));
 
       if (creds instanceof ServiceAccountSigner signer) {
         options.add(SignUrlOption.signWith(signer));
@@ -408,11 +429,7 @@ public final class GcsStorageClient implements StorageClient {
           storage.signUrl(
               info, expires.toSeconds(), TimeUnit.SECONDS, options.toArray(SignUrlOption[]::new));
 
-      URI capability =
-          config
-              .publicEndpoint()
-              .map(endpoint -> publicUri(endpoint, url))
-              .orElseGet(() -> URI.create(url.toString()));
+      URI capability = URI.create(url.toString());
       Map<String, String> headers =
           contentType == null || contentType.isBlank()
               ? Map.of()
@@ -429,18 +446,22 @@ public final class GcsStorageClient implements StorageClient {
     }
   }
 
-  private static URI publicUri(String endpoint, URL signed) {
-    URI base = URI.create(endpoint);
-    String basePath = Optional.ofNullable(base.getRawPath()).orElse("");
-    String signedPath = signed.getPath();
-    String path =
-        (basePath.endsWith("/") ? basePath.substring(0, basePath.length() - 1) : basePath)
-            + signedPath;
-    try {
-      return new URI(base.getScheme(), base.getRawAuthority(), path, signed.getQuery(), null);
-    } catch (java.net.URISyntaxException failure) {
-      throw new IllegalArgumentException("Invalid public GCS endpoint", failure);
+  /** Signing must include the public authority; never rewrite a signed path or query afterward. */
+  private static String signingEndpoint(String endpoint) {
+    URI uri = URI.create(endpoint);
+    String path = uri.getRawPath();
+    if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+        || uri.getHost() == null
+        || uri.getRawUserInfo() != null
+        || uri.getRawQuery() != null
+        || uri.getRawFragment() != null
+        || (path != null && !path.isEmpty() && !path.equals("/"))) {
+      throw StorageException.invalidRequest(
+          PROVIDER_ID,
+          "Public GCS endpoint must be an HTTP(S) origin without a path, query or fragment",
+          null);
     }
+    return uri.getScheme() + "://" + uri.getRawAuthority();
   }
 
   private StorageException mapException(String message, Exception e) {
@@ -475,7 +496,8 @@ public final class GcsStorageClient implements StorageClient {
     if (e < s) {
       return 0L;
     }
-    return (e - s) + 1;
+    long difference = e - s;
+    return difference == Long.MAX_VALUE ? Long.MAX_VALUE : difference + 1;
   }
 
   private static StorageAndCreds buildStorage(NamedStorageClientConfig cfg) {
@@ -540,6 +562,10 @@ public final class GcsStorageClient implements StorageClient {
 
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
+      Objects.checkFromIndexSize(off, len, b.length);
+      if (len == 0) {
+        return 0;
+      }
       if (remaining <= 0) {
         return -1;
       }

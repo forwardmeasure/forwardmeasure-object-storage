@@ -56,7 +56,6 @@ public final class AzureStorageClient implements StorageClient {
   private final BlobServiceClient serviceClient;
 
   private final BlobServiceClient publicServiceClient;
-  private final StorageSharedKeyCredential credential;
   private final EventLoopGroup eventLoopGroup;
 
   public AzureStorageClient(NamedStorageClientConfig config) {
@@ -75,7 +74,7 @@ public final class AzureStorageClient implements StorageClient {
                     StorageException.invalidRequest(
                         PROVIDER_ID, "Azure account key is required", null));
 
-    this.credential = new StorageSharedKeyCredential(accountName, accountKey);
+    var credential = new StorageSharedKeyCredential(accountName, accountKey);
     this.eventLoopGroup = new NioEventLoopGroup(2);
     this.serviceClient = buildClient(config, credential, eventLoopGroup);
     this.publicServiceClient =
@@ -84,6 +83,12 @@ public final class AzureStorageClient implements StorageClient {
             .filter(endpoint -> !endpoint.equals(config.endpoint().orElse(null)))
             .map(endpoint -> buildClient(endpoint, config, credential, eventLoopGroup))
             .orElse(serviceClient);
+  }
+
+  AzureStorageClient(BlobServiceClient serviceClient, EventLoopGroup eventLoopGroup) {
+    this.serviceClient = serviceClient;
+    this.publicServiceClient = serviceClient;
+    this.eventLoopGroup = eventLoopGroup;
   }
 
   @Override
@@ -164,9 +169,30 @@ public final class AzureStorageClient implements StorageClient {
       if (request.prefix() != null && !request.prefix().isBlank()) {
         options.setPrefix(request.prefix());
       }
+      if (request.maxKeys() > 0) {
+        options.setMaxResultsPerPage(request.maxKeys());
+      }
+
+      var listing =
+          request.delimiter() == null || request.delimiter().isBlank()
+              ? container.listBlobs(options, null)
+              : container.listBlobsByHierarchy(request.delimiter(), options, null);
+      String token = request.continuationToken();
+      var pages =
+          (token == null || token.isBlank()
+                  ? listing.iterableByPage()
+                  : listing.iterableByPage(token))
+              .iterator();
+      if (!pages.hasNext()) {
+        return new ListObjectsResponse(List.of(), null, false);
+      }
+      var page = pages.next();
 
       List<ObjectInfo> out = new ArrayList<>();
-      for (BlobItem blob : container.listBlobs(options, null)) {
+      for (BlobItem blob : page.getValue()) {
+        if (Boolean.TRUE.equals(blob.isPrefix())) {
+          continue;
+        }
         BlobProperties p = container.getBlobClient(blob.getName()).getProperties();
         out.add(
             new ObjectInfo(
@@ -179,13 +205,10 @@ public final class AzureStorageClient implements StorageClient {
                 null,
                 p.getMetadata() == null ? Map.of() : Map.copyOf(p.getMetadata()),
                 Map.of()));
-
-        if (request.maxKeys() > 0 && out.size() >= request.maxKeys()) {
-          break;
-        }
       }
 
-      return new ListObjectsResponse(out, null, false);
+      String next = page.getContinuationToken();
+      return new ListObjectsResponse(out, next, next != null && !next.isBlank());
     } catch (StorageException e) {
       throw e;
     } catch (BlobStorageException e) {
@@ -234,8 +257,8 @@ public final class AzureStorageClient implements StorageClient {
       InputStream stream;
       if (request.rangeStartInclusive() != null || request.rangeEndInclusive() != null) {
         long start = request.rangeStartInclusive() == null ? 0L : request.rangeStartInclusive();
-        Long count =
-            request.rangeEndInclusive() == null ? null : (request.rangeEndInclusive() - start + 1);
+        Long end = request.rangeEndInclusive();
+        Long count = end == null || end - start == Long.MAX_VALUE ? null : end - start + 1;
         BlobRange range = new BlobRange(start, count);
         stream = blob.openInputStream(new BlobInputStreamOptions().setRange(range));
       } else {

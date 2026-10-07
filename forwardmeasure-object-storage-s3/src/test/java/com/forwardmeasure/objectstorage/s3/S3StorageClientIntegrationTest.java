@@ -115,6 +115,101 @@ class S3StorageClientIntegrationTest {
     }
   }
 
+  @Test
+  void separatesInternalOperationsFromPublicSigningAndSupportsFilesStreamsAndPagination()
+      throws Exception {
+    try (var minio = new MinioTestContainer().start()) {
+      var base = configuration(minio);
+      var config =
+          (NamedStorageClientConfig)
+              java.lang.reflect.Proxy.newProxyInstance(
+                  NamedStorageClientConfig.class.getClassLoader(),
+                  new Class<?>[] {NamedStorageClientConfig.class},
+                  (proxy, method, args) ->
+                      method.getName().equals("publicEndpoint")
+                          ? Optional.of("https://public-storage.example.test")
+                          : method.invoke(base, args));
+      try (var storage = new S3StorageClient(config)) {
+        String bucket = "extended-contract";
+        storage.createBucket(new StorageClient.CreateBucketRequest(bucket, null, null));
+        assertTrue(storage.getBucket(bucket).isPresent());
+        assertTrue(storage.listBuckets().stream().anyMatch(value -> value.name().equals(bucket)));
+        assertTrue(storage.unwrap() instanceof software.amazon.awssdk.services.s3.S3Client);
+        var file = java.nio.file.Files.createTempFile("s3-contract", ".txt");
+        try {
+          java.nio.file.Files.writeString(file, "abcdef");
+          storage.putObject(
+              StorageClient.PutObjectRequest.fromPath(bucket, "a.txt", file, null, null));
+          try (var stream =
+              new java.io.ByteArrayInputStream("stream".getBytes(StandardCharsets.UTF_8))) {
+            storage.putObject(
+                StorageClient.PutObjectRequest.fromStream(bucket, "b.txt", stream, 6, null, null));
+          }
+        } finally {
+          java.nio.file.Files.deleteIfExists(file);
+        }
+        var first =
+            storage.listObjects(new StorageClient.ListObjectsRequest(bucket, null, null, 1, " "));
+        assertTrue(first.isTruncated());
+        var next =
+            storage.listObjects(
+                new StorageClient.ListObjectsRequest(
+                    bucket, null, null, 1, first.nextContinuationToken()));
+        assertEquals(1, next.objects().size());
+        assertFalse(first.objects().getFirst().key().equals(next.objects().getFirst().key()));
+        try (var tail =
+                storage.getObject(new StorageClient.GetObjectRequest(bucket, "a.txt", 3L, null));
+            var head =
+                storage.getObject(new StorageClient.GetObjectRequest(bucket, "a.txt", null, 2L))) {
+          assertEquals(bucket, tail.bucketName());
+          assertEquals("a.txt", tail.key());
+          assertEquals("def", new String(tail.content().readAllBytes(), StandardCharsets.UTF_8));
+          assertEquals("abc", new String(head.content().readAllBytes(), StandardCharsets.UTF_8));
+        }
+        assertEquals(
+            "public-storage.example.test",
+            storage
+                .presignGet(
+                    new StorageClient.PresignGetRequest(bucket, "a.txt", Duration.ofMinutes(1)))
+                .uri()
+                .getHost());
+        for (String contentType : new String[] {null, " "})
+          assertEquals(
+              "public-storage.example.test",
+              storage
+                  .presignPut(
+                      new StorageClient.PresignPutRequest(
+                          bucket, "signed", Duration.ofMinutes(1), contentType))
+                  .uri()
+                  .getHost());
+        var conflict =
+            assertThrows(
+                StorageException.class,
+                () -> storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, false)));
+        assertEquals("CONFLICT", conflict.code());
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, true));
+        assertTrue(storage.getBucket(bucket).isEmpty());
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, false));
+        storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, "missing"));
+        assertEquals(
+            "NOT_FOUND",
+            assertThrows(
+                    StorageException.class,
+                    () -> storage.getObject(StorageClient.GetObjectRequest.of(bucket, "missing")))
+                .code());
+        assertEquals(
+            "NOT_FOUND",
+            assertThrows(
+                    StorageException.class,
+                    () ->
+                        storage.putObject(
+                            StorageClient.PutObjectRequest.fromBytes(
+                                bucket, "key", new byte[0], null, null)))
+                .code());
+      }
+    }
+  }
+
   private static NamedStorageClientConfig configuration(MinioTestContainer minio) {
     return new NamedStorageClientConfig() {
       @Override

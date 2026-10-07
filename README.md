@@ -77,6 +77,11 @@ address placed in delegated upload/download capabilities returned to external
 callers. They may be the same in a public cloud and different for an in-cluster
 MinIO or emulator deployment.
 
+For GCS, `public-endpoint` must be an HTTP(S) origin, optionally with a port
+and trailing slash. Path prefixes, credentials, query strings and fragments are
+rejected. The public host participates in the signature; signed URLs must not
+be rewritten afterward.
+
 Include the provider artifacts required by the application. The registry finds
 them automatically:
 

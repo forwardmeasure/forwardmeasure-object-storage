@@ -458,7 +458,7 @@ public final class S3StorageClient implements StorageClient {
     }
 
     b.region(Region.of(cfg.region().orElse("us-east-1")));
-    cfg.publicEndpoint().or(cfg::endpoint).ifPresent(ep -> b.endpointOverride(URI.create(ep)));
+    cfg.endpoint().ifPresent(ep -> b.endpointOverride(URI.create(ep)));
 
     b.serviceConfiguration(
         S3Configuration.builder()
@@ -493,7 +493,7 @@ public final class S3StorageClient implements StorageClient {
     }
 
     b.region(Region.of(cfg.region().orElse("us-east-1")));
-    cfg.endpoint().ifPresent(ep -> b.endpointOverride(URI.create(ep)));
+    cfg.publicEndpoint().or(cfg::endpoint).ifPresent(ep -> b.endpointOverride(URI.create(ep)));
     b.serviceConfiguration(
         S3Configuration.builder()
             .pathStyleAccessEnabled(cfg.pathStyleAccess().orElse(false))
