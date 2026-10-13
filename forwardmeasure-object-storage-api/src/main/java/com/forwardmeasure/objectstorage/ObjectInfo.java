@@ -35,7 +35,8 @@ public record ObjectInfo(
     String versionId,
     String storageClass,
     Map<String, String> userMetadata,
-    Map<String, String> attributes) {
+    Map<String, String> attributes,
+    ObjectChecksums checksums) {
   public ObjectInfo {
     if (bucketName == null || bucketName.isBlank()) {
       throw new IllegalArgumentException("bucketName is required");
@@ -48,6 +49,31 @@ public record ObjectInfo(
     }
     userMetadata = (userMetadata == null) ? Map.of() : Map.copyOf(userMetadata);
     attributes = (attributes == null) ? Map.of() : Map.copyOf(attributes);
+    checksums = checksums == null ? ObjectChecksums.NONE : checksums;
+  }
+
+  /** Without checksums, for providers and listings that do not report them. */
+  public ObjectInfo(
+      String bucketName,
+      String key,
+      long size,
+      Instant lastModified,
+      String contentTag,
+      String versionId,
+      String storageClass,
+      Map<String, String> userMetadata,
+      Map<String, String> attributes) {
+    this(
+        bucketName,
+        key,
+        size,
+        lastModified,
+        contentTag,
+        versionId,
+        storageClass,
+        userMetadata,
+        attributes,
+        ObjectChecksums.NONE);
   }
 
   public Optional<Instant> lastModifiedOptional() {

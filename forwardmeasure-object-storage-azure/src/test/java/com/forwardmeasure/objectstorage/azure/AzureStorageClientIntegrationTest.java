@@ -109,6 +109,44 @@ class AzureStorageClientIntegrationTest {
     }
   }
 
+  /**
+   * Objects carry their MD5, and a read is pinned to the blob the metadata describes: overwritten
+   * after it was opened, it either still yields exactly the original bytes or fails - never the
+   * replacement's.
+   */
+  @Test
+  void reportsChecksumsAndNeverReadsAReplacedBlob() throws Exception {
+    try (var azurite = azurite()) {
+      azurite.start();
+      try (var storage = new AzureStorageClient(configuration(azurite))) {
+        String bucket = "object-storage-pinning";
+        String key = "sources/feed.csv";
+        byte[] first = "uid,name\n1,First\n".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "uid,name\n2,Second\n".getBytes(StandardCharsets.UTF_8);
+        storage.createBucket(new StorageClient.CreateBucketRequest(bucket, Map.of(), Map.of()));
+        storage.putObject(
+            StorageClient.PutObjectRequest.fromBytes(bucket, key, first, "text/csv", Map.of()));
+
+        var head = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
+        assertEquals(
+            java.util.Base64.getEncoder()
+                .encodeToString(java.security.MessageDigest.getInstance("MD5").digest(first)),
+            head.checksums().md5());
+
+        var opened = storage.getObject(StorageClient.GetObjectRequest.of(bucket, key));
+        storage.putObject(
+            StorageClient.PutObjectRequest.fromBytes(bucket, key, second, "text/csv", Map.of()));
+        try {
+          assertArrayEquals(first, opened.content().readAllBytes());
+        } catch (java.io.IOException | RuntimeException replaced) {
+          // The read was refused because the blob changed: equally correct.
+        } finally {
+          opened.close();
+        }
+      }
+    }
+  }
+
   @Test
   void paginatedListingsFilesStreamsAndRangeBoundariesPreserveObjects() throws Exception {
     try (var azurite = azurite()) {

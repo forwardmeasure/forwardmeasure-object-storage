@@ -115,6 +115,64 @@ class S3StorageClientIntegrationTest {
     }
   }
 
+  /**
+   * Objects carry their full-object CRC32C, and a read names one version: on a versioned bucket an
+   * overwritten version still reads back exactly its own bytes.
+   */
+  @Test
+  void reportsChecksumsAndReadsOnlyThePinnedVersion() throws Exception {
+    try (var minio = new MinioTestContainer().start();
+        var registry = new StorageClientRegistry(configurationGroup(minio))) {
+      var storage = registry.getDefault();
+      String bucket = "object-storage-pinning";
+      String key = "sources/feed.csv";
+      byte[] first = "uid,name\n1,First\n".getBytes(StandardCharsets.UTF_8);
+      byte[] second = "uid,name\n2,Second\n".getBytes(StandardCharsets.UTF_8);
+      storage.createBucket(new StorageClient.CreateBucketRequest(bucket, Map.of(), Map.of()));
+      // Versioning is a bucket setting outside this client's API; set it on the native client.
+      ((software.amazon.awssdk.services.s3.S3Client) storage.unwrap())
+          .putBucketVersioning(
+              b ->
+                  b.bucket(bucket)
+                      .versioningConfiguration(
+                          v ->
+                              v.status(
+                                  software.amazon.awssdk.services.s3.model.BucketVersioningStatus
+                                      .ENABLED)));
+
+      String firstVersion =
+          storage
+              .putObject(
+                  StorageClient.PutObjectRequest.fromBytes(
+                      bucket, key, first, "text/csv", Map.of()))
+              .versionId();
+      var original =
+          storage.headObject(new StorageClient.HeadObjectRequest(bucket, key, firstVersion));
+      assertEquals(firstVersion, original.versionId());
+      assertEquals(crc32c(first), original.checksums().crc32c());
+
+      storage.putObject(
+          StorageClient.PutObjectRequest.fromBytes(bucket, key, second, "text/csv", Map.of()));
+      var live = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
+      assertFalse(firstVersion.equals(live.versionId()), "an overwrite is a new version");
+      assertEquals(crc32c(second), live.checksums().crc32c());
+
+      try (var pinned =
+          storage.getObject(StorageClient.GetObjectRequest.ofVersion(bucket, key, firstVersion))) {
+        assertEquals(firstVersion, pinned.metadata().versionId().orElseThrow());
+        assertEquals(crc32c(first), pinned.metadata().checksums().crc32c());
+        assertArrayEquals(first, pinned.content().readAllBytes());
+      }
+    }
+  }
+
+  private static String crc32c(byte[] content) {
+    var crc = new java.util.zip.CRC32C();
+    crc.update(content);
+    return java.util.Base64.getEncoder()
+        .encodeToString(java.nio.ByteBuffer.allocate(4).putInt((int) crc.getValue()).array());
+  }
+
   @Test
   void separatesInternalOperationsFromPublicSigningAndSupportsFilesStreamsAndPagination()
       throws Exception {

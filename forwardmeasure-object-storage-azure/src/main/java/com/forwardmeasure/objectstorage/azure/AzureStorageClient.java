@@ -26,6 +26,7 @@ import com.azure.storage.blob.models.BlobHttpHeaders;
 import com.azure.storage.blob.models.BlobItem;
 import com.azure.storage.blob.models.BlobProperties;
 import com.azure.storage.blob.models.BlobRange;
+import com.azure.storage.blob.models.BlobRequestConditions;
 import com.azure.storage.blob.models.BlobStorageException;
 import com.azure.storage.blob.models.ListBlobsOptions;
 import com.azure.storage.blob.options.BlobInputStreamOptions;
@@ -34,6 +35,7 @@ import com.azure.storage.blob.sas.BlobServiceSasSignatureValues;
 import com.azure.storage.common.StorageSharedKeyCredential;
 import com.forwardmeasure.objectstorage.Bucket;
 import com.forwardmeasure.objectstorage.DefaultObjectMetadata;
+import com.forwardmeasure.objectstorage.ObjectChecksums;
 import com.forwardmeasure.objectstorage.ObjectInfo;
 import com.forwardmeasure.objectstorage.StorageClient;
 import com.forwardmeasure.objectstorage.StorageException;
@@ -219,10 +221,13 @@ public final class AzureStorageClient implements StorageClient {
   @Override
   public ObjectInfo headObject(HeadObjectRequest request) {
     try {
-      BlobClient blob = blob(request.bucketName(), request.key());
+      BlobClient blob = blob(request.bucketName(), request.key(), request.versionId());
       if (!blob.exists()) {
         throw StorageException.notFound(
-            PROVIDER_ID, "Object not found: " + request.bucketName() + "/" + request.key(), null);
+            PROVIDER_ID,
+            "Object not found: "
+                + describe(request.bucketName(), request.key(), request.versionId()),
+            null);
       }
 
       BlobProperties p = blob.getProperties();
@@ -232,10 +237,11 @@ public final class AzureStorageClient implements StorageClient {
           p.getBlobSize(),
           p.getLastModified() == null ? null : p.getLastModified().toInstant(),
           p.getETag(),
-          null,
+          p.getVersionId(),
           null,
           p.getMetadata() == null ? Map.of() : Map.copyOf(p.getMetadata()),
-          Map.of());
+          Map.of(),
+          checksums(p));
     } catch (StorageException e) {
       throw e;
     } catch (BlobStorageException e) {
@@ -246,31 +252,36 @@ public final class AzureStorageClient implements StorageClient {
   @Override
   public StorageObject getObject(GetObjectRequest request) {
     try {
-      BlobClient blob = blob(request.bucketName(), request.key());
+      BlobClient blob = blob(request.bucketName(), request.key(), request.versionId());
       if (!blob.exists()) {
         throw StorageException.notFound(
-            PROVIDER_ID, "Object not found: " + request.bucketName() + "/" + request.key(), null);
+            PROVIDER_ID,
+            "Object not found: "
+                + describe(request.bucketName(), request.key(), request.versionId()),
+            null);
       }
 
       BlobProperties p = blob.getProperties();
 
-      InputStream stream;
+      // Read exactly the content the metadata describes: the read fails rather than returning a
+      // blob overwritten since the properties were fetched.
+      BlobInputStreamOptions options =
+          new BlobInputStreamOptions()
+              .setRequestConditions(new BlobRequestConditions().setIfMatch(p.getETag()));
       if (request.rangeStartInclusive() != null || request.rangeEndInclusive() != null) {
         long start = request.rangeStartInclusive() == null ? 0L : request.rangeStartInclusive();
         Long end = request.rangeEndInclusive();
         Long count = end == null || end - start == Long.MAX_VALUE ? null : end - start + 1;
-        BlobRange range = new BlobRange(start, count);
-        stream = blob.openInputStream(new BlobInputStreamOptions().setRange(range));
-      } else {
-        stream = blob.openInputStream();
+        options.setRange(new BlobRange(start, count));
       }
+      InputStream stream = blob.openInputStream(options);
 
       DefaultObjectMetadata md =
           new DefaultObjectMetadata(
               p.getContentType(),
               p.getBlobSize(),
               p.getETag(),
-              null,
+              p.getVersionId(),
               p.getLastModified() == null ? null : p.getLastModified().toInstant(),
               p.getMetadata() == null ? Map.of() : Map.copyOf(p.getMetadata()),
               Map.of(),
@@ -278,7 +289,8 @@ public final class AzureStorageClient implements StorageClient {
               p.getContentEncoding(),
               p.getCacheControl(),
               p.getContentDisposition(),
-              p.getContentLanguage());
+              p.getContentLanguage(),
+              checksums(p));
 
       return new AzureStorageObject(request.bucketName(), request.key(), md, stream);
     } catch (StorageException e) {
@@ -307,30 +319,41 @@ public final class AzureStorageClient implements StorageClient {
       Map<String, String> metadata =
           request.userMetadata() == null ? Map.of() : request.userMetadata();
 
+      // The MD5 is computed as the content streams up: Azure stores one only for single-request
+      // uploads, and setting HTTP headers afterwards replaces every header, the MD5 included.
+      java.security.MessageDigest md5 = java.security.MessageDigest.getInstance("MD5");
       if (request.bytes() != null) {
-        try (InputStream in = new ByteArrayInputStream(request.bytes())) {
+        try (InputStream in =
+            new java.security.DigestInputStream(new ByteArrayInputStream(request.bytes()), md5)) {
           blob.upload(in, request.bytes().length, true); // overwrite=true
         }
       } else if (request.stream() != null) {
-        blob.upload(request.stream(), request.contentLength(), true); // overwrite=true
+        blob.upload(
+            new java.security.DigestInputStream(request.stream(), md5),
+            request.contentLength(),
+            true); // overwrite=true
       } else if (request.filePath() != null) {
-        blob.uploadFromFile(request.filePath().toString(), true); // overwrite=true
+        try (InputStream in =
+            new java.security.DigestInputStream(
+                java.nio.file.Files.newInputStream(request.filePath()), md5)) {
+          blob.upload(in, java.nio.file.Files.size(request.filePath()), true); // overwrite=true
+        }
       } else {
         throw new IllegalArgumentException(
             "Exactly one of filePath, bytes, or stream must be provided");
       }
 
       // Apply headers + metadata AFTER upload (SDK limitation)
-      if (headers.getContentType() != null) {
-        blob.setHttpHeaders(headers);
-      }
+      headers.setContentMd5(md5.digest());
+      blob.setHttpHeaders(headers);
       if (!metadata.isEmpty()) {
         blob.setMetadata(metadata);
       }
 
       BlobProperties p = blob.getProperties();
 
-      return new PutObjectResult(request.bucketName(), request.key(), p.getETag(), null);
+      return new PutObjectResult(
+          request.bucketName(), request.key(), p.getETag(), p.getVersionId());
 
     } catch (StorageException e) {
       throw e;
@@ -405,6 +428,21 @@ public final class AzureStorageClient implements StorageClient {
 
   private BlobClient blob(String bucketName, String key) {
     return container(bucketName).getBlobClient(key);
+  }
+
+  private BlobClient blob(String bucketName, String key, String versionId) {
+    BlobClient blob = blob(bucketName, key);
+    return versionId == null ? blob : blob.getVersionClient(versionId);
+  }
+
+  private static String describe(String bucket, String key, String versionId) {
+    return bucket + "/" + key + (versionId == null ? "" : "#" + versionId);
+  }
+
+  private static ObjectChecksums checksums(BlobProperties properties) {
+    byte[] md5 = properties.getContentMd5();
+    return new ObjectChecksums(
+        null, md5 == null ? null : java.util.Base64.getEncoder().encodeToString(md5));
   }
 
   private BlobClient publicBlob(String bucketName, String key) {

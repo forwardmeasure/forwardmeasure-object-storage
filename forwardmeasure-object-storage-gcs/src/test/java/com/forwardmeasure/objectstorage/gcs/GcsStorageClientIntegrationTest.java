@@ -121,6 +121,85 @@ class GcsStorageClientIntegrationTest {
     }
   }
 
+  /**
+   * Checksums are the object's real CRC32C and MD5, and a read names one generation: after an
+   * overwrite, the old generation is never answered with the new bytes.
+   */
+  @Test
+  void reportsChecksumsAndReadsOnlyThePinnedGeneration() throws Exception {
+    int hostPort = availablePort();
+    String endpoint = "http://localhost:" + hostPort;
+    Path credentials = serviceAccountCredentials();
+
+    try (var gcs = fakeGcs(hostPort, endpoint)) {
+      gcs.start();
+      try (var storage = new GcsStorageClient(configuration(endpoint, credentials))) {
+        String bucket = "object-storage-pinning";
+        String key = "sources/feed.csv";
+        byte[] first = "uid,name\n1,First\n".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "uid,name\n2,Second\n".getBytes(StandardCharsets.UTF_8);
+        storage.createBucket(
+            new StorageClient.CreateBucketRequest(bucket, Map.of(), Map.of("location", "US")));
+
+        storage.putObject(
+            StorageClient.PutObjectRequest.fromBytes(bucket, key, first, "text/csv", Map.of()));
+        var original = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
+        assertEquals(crc32c(first), original.checksums().crc32c());
+        assertEquals(md5(first), original.checksums().md5());
+        String generation = original.versionId();
+        assertTrue(generation != null && !generation.isBlank());
+
+        try (var object =
+            storage.getObject(StorageClient.GetObjectRequest.ofVersion(bucket, key, generation))) {
+          assertEquals(generation, object.metadata().versionId().orElseThrow());
+          assertEquals(crc32c(first), object.metadata().checksums().crc32c());
+          assertArrayEquals(first, object.content().readAllBytes());
+        }
+
+        storage.putObject(
+            StorageClient.PutObjectRequest.fromBytes(bucket, key, second, "text/csv", Map.of()));
+        var replaced = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
+        assertFalse(generation.equals(replaced.versionId()), "an overwrite is a new generation");
+        assertEquals(crc32c(second), replaced.checksums().crc32c());
+
+        // The bucket keeps no noncurrent versions, so the pinned generation is gone: the read
+        // fails instead of returning the replacement's bytes.
+        assertThrows(
+            StorageException.class,
+            () -> {
+              try (var stale =
+                  storage.getObject(
+                      StorageClient.GetObjectRequest.ofVersion(bucket, key, generation))) {
+                stale.content().readAllBytes();
+              }
+            });
+        assertThrows(
+            StorageException.class,
+            () -> storage.headObject(new StorageClient.HeadObjectRequest(bucket, key, generation)));
+        try (var current =
+            storage.getObject(
+                StorageClient.GetObjectRequest.ofVersion(bucket, key, replaced.versionId()))) {
+          assertArrayEquals(second, current.content().readAllBytes());
+        }
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, true));
+      }
+    } finally {
+      Files.deleteIfExists(credentials);
+    }
+  }
+
+  private static String crc32c(byte[] content) {
+    var crc = new java.util.zip.CRC32C();
+    crc.update(content);
+    return Base64.getEncoder()
+        .encodeToString(java.nio.ByteBuffer.allocate(4).putInt((int) crc.getValue()).array());
+  }
+
+  private static String md5(byte[] content) throws Exception {
+    return Base64.getEncoder()
+        .encodeToString(java.security.MessageDigest.getInstance("MD5").digest(content));
+  }
+
   @Test
   void signedCapabilitiesPreserveObjectNamesAndVerifyAgainstThePublicHost() throws Exception {
     Path credentials = serviceAccountCredentials();

@@ -18,6 +18,7 @@ package com.forwardmeasure.objectstorage.s3;
 
 import com.forwardmeasure.objectstorage.Bucket;
 import com.forwardmeasure.objectstorage.DefaultObjectMetadata;
+import com.forwardmeasure.objectstorage.ObjectChecksums;
 import com.forwardmeasure.objectstorage.ObjectInfo;
 import com.forwardmeasure.objectstorage.StorageClient;
 import com.forwardmeasure.objectstorage.StorageException;
@@ -41,6 +42,8 @@ import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyExistsException;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException;
 import software.amazon.awssdk.services.s3.model.BucketLocationConstraint;
+import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
+import software.amazon.awssdk.services.s3.model.ChecksumMode;
 import software.amazon.awssdk.services.s3.model.CreateBucketConfiguration;
 import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
@@ -220,6 +223,8 @@ public final class S3StorageClient implements StorageClient {
               software.amazon.awssdk.services.s3.model.HeadObjectRequest.builder()
                   .bucket(request.bucketName())
                   .key(request.key())
+                  .versionId(request.versionId())
+                  .checksumMode(ChecksumMode.ENABLED)
                   .build());
 
       return new ObjectInfo(
@@ -231,7 +236,8 @@ public final class S3StorageClient implements StorageClient {
           r.versionId(),
           r.storageClassAsString(),
           r.metadata() == null ? Map.of() : r.metadata(),
-          Map.of());
+          Map.of(),
+          new ObjectChecksums(fullObjectCrc32c(r.checksumCRC32C()), null));
 
     } catch (NoSuchKeyException e) {
       throw StorageException.notFound(
@@ -249,7 +255,10 @@ public final class S3StorageClient implements StorageClient {
       software.amazon.awssdk.services.s3.model.GetObjectRequest.Builder b =
           software.amazon.awssdk.services.s3.model.GetObjectRequest.builder()
               .bucket(request.bucketName())
-              .key(request.key());
+              .key(request.key())
+              .versionId(request.versionId())
+              // The SDK then also verifies the stored checksum as the body is read.
+              .checksumMode(ChecksumMode.ENABLED);
 
       if (request.rangeStartInclusive() != null || request.rangeEndInclusive() != null) {
         long start = request.rangeStartInclusive() == null ? 0L : request.rangeStartInclusive();
@@ -274,7 +283,8 @@ public final class S3StorageClient implements StorageClient {
               r.contentEncoding(),
               r.cacheControl(),
               r.contentDisposition(),
-              r.contentLanguage());
+              r.contentLanguage(),
+              new ObjectChecksums(fullObjectCrc32c(r.checksumCRC32C()), null));
 
       return new S3StorageObject(request.bucketName(), request.key(), md, body);
 
@@ -296,7 +306,10 @@ public final class S3StorageClient implements StorageClient {
               .bucket(request.bucketName())
               .key(request.key())
               .contentType(request.contentType())
-              .metadata(request.userMetadata());
+              .metadata(request.userMetadata())
+              // A full-object CRC32C, the checksum GCS keeps too, so readers can pin and verify
+              // what they read on either provider.
+              .checksumAlgorithm(ChecksumAlgorithm.CRC32_C);
 
       PutObjectResponse resp;
 
@@ -500,6 +513,14 @@ public final class S3StorageClient implements StorageClient {
             .build());
 
     return b.build();
+  }
+
+  /**
+   * S3 reports a multipart object's composite checksum as "value-partCount", which is not a
+   * checksum of the object's bytes; only a full-object value is reported.
+   */
+  private static String fullObjectCrc32c(String value) {
+    return value == null || value.contains("-") ? null : value;
   }
 
   private StorageException mapException(String msg, Exception e) {

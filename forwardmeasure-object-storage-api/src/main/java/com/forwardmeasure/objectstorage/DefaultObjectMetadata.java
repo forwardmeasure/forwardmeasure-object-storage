@@ -32,14 +32,51 @@ public record DefaultObjectMetadata(
     String contentEncodingValue,
     String cacheControlValue,
     String contentDispositionValue,
-    String contentLanguageValue)
+    String contentLanguageValue,
+    ObjectChecksums checksumsValue)
     implements ObjectMetadata {
 
   public DefaultObjectMetadata {
+    checksumsValue = checksumsValue == null ? ObjectChecksums.NONE : checksumsValue;
     if (contentLength < 0) throw new IllegalArgumentException("contentLength must be >= 0");
     userMetadataMap = userMetadataMap == null ? Map.of() : Map.copyOf(userMetadataMap);
     systemMetadataMap = systemMetadataMap == null ? Map.of() : Map.copyOf(systemMetadataMap);
     attributesMap = attributesMap == null ? Map.of() : Map.copyOf(attributesMap);
+  }
+
+  /** Without checksums, for providers that do not report them. */
+  public DefaultObjectMetadata(
+      String contentTypeValue,
+      long contentLength,
+      String contentTagValue,
+      String versionIdValue,
+      Instant lastModifiedValue,
+      Map<String, String> userMetadataMap,
+      Map<String, String> systemMetadataMap,
+      Map<String, String> attributesMap,
+      String contentEncodingValue,
+      String cacheControlValue,
+      String contentDispositionValue,
+      String contentLanguageValue) {
+    this(
+        contentTypeValue,
+        contentLength,
+        contentTagValue,
+        versionIdValue,
+        lastModifiedValue,
+        userMetadataMap,
+        systemMetadataMap,
+        attributesMap,
+        contentEncodingValue,
+        cacheControlValue,
+        contentDispositionValue,
+        contentLanguageValue,
+        ObjectChecksums.NONE);
+  }
+
+  @Override
+  public ObjectChecksums checksums() {
+    return checksumsValue;
   }
 
   @Override

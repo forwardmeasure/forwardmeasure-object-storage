@@ -75,4 +75,9 @@ public interface ObjectMetadata {
   Optional<String> contentDisposition();
 
   Optional<String> contentLanguage();
+
+  /** The provider's whole-object checksums, when it holds them. */
+  default ObjectChecksums checksums() {
+    return ObjectChecksums.NONE;
+  }
 }

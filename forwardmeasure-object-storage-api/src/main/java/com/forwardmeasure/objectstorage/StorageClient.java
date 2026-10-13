@@ -129,7 +129,11 @@ public interface StorageClient extends AutoCloseable {
     }
   }
 
-  record HeadObjectRequest(String bucketName, String key) {
+  /**
+   * {@code versionId} names one version of the object (a GCS generation, an S3 or Azure version
+   * id); null means the live version.
+   */
+  record HeadObjectRequest(String bucketName, String key, String versionId) {
     public HeadObjectRequest {
       if (bucketName == null || bucketName.isBlank()) {
         throw new IllegalArgumentException("bucketName is required");
@@ -137,12 +141,31 @@ public interface StorageClient extends AutoCloseable {
       if (key == null || key.isBlank()) {
         throw new IllegalArgumentException("key is required");
       }
+      if (versionId != null && versionId.isBlank()) {
+        throw new IllegalArgumentException("versionId must not be blank");
+      }
+    }
+
+    public HeadObjectRequest(String bucketName, String key) {
+      this(bucketName, key, null);
     }
   }
 
+  /**
+   * {@code versionId} names one version of the object (a GCS generation, an S3 or Azure version
+   * id); null means the live version. The content returned is always the version the returned
+   * metadata describes.
+   */
   record GetObjectRequest(
-      String bucketName, String key, Long rangeStartInclusive, Long rangeEndInclusive) {
+      String bucketName,
+      String key,
+      Long rangeStartInclusive,
+      Long rangeEndInclusive,
+      String versionId) {
     public GetObjectRequest {
+      if (versionId != null && versionId.isBlank()) {
+        throw new IllegalArgumentException("versionId must not be blank");
+      }
       if (bucketName == null || bucketName.isBlank()) {
         throw new IllegalArgumentException("bucketName is required");
       }
@@ -162,8 +185,18 @@ public interface StorageClient extends AutoCloseable {
       }
     }
 
+    public GetObjectRequest(
+        String bucketName, String key, Long rangeStartInclusive, Long rangeEndInclusive) {
+      this(bucketName, key, rangeStartInclusive, rangeEndInclusive, null);
+    }
+
     public static GetObjectRequest of(String bucketName, String key) {
-      return new GetObjectRequest(bucketName, key, null, null);
+      return new GetObjectRequest(bucketName, key, null, null, null);
+    }
+
+    /** The whole of one version of the object. */
+    public static GetObjectRequest ofVersion(String bucketName, String key, String versionId) {
+      return new GetObjectRequest(bucketName, key, null, null, versionId);
     }
   }
 

@@ -18,6 +18,7 @@ package com.forwardmeasure.objectstorage.gcs;
 
 import com.forwardmeasure.objectstorage.Bucket;
 import com.forwardmeasure.objectstorage.DefaultObjectMetadata;
+import com.forwardmeasure.objectstorage.ObjectChecksums;
 import com.forwardmeasure.objectstorage.ObjectInfo;
 import com.forwardmeasure.objectstorage.StorageClient;
 import com.forwardmeasure.objectstorage.StorageException;
@@ -221,10 +222,13 @@ public final class GcsStorageClient implements StorageClient {
   @Override
   public ObjectInfo headObject(HeadObjectRequest request) {
     try {
-      Blob blob = storage.get(BlobId.of(request.bucketName(), request.key()));
+      Blob blob = storage.get(blobId(request.bucketName(), request.key(), request.versionId()));
       if (blob == null) {
         throw StorageException.notFound(
-            PROVIDER_ID, "Object not found: " + request.bucketName() + "/" + request.key(), null);
+            PROVIDER_ID,
+            "Object not found: "
+                + describe(request.bucketName(), request.key(), request.versionId()),
+            null);
       }
 
       return new ObjectInfo(
@@ -236,7 +240,8 @@ public final class GcsStorageClient implements StorageClient {
           blob.getGeneration() == null ? null : String.valueOf(blob.getGeneration()),
           blob.getStorageClass() == null ? null : blob.getStorageClass().name(),
           blob.getMetadata() == null ? Map.of() : blob.getMetadata(),
-          Map.of());
+          Map.of(),
+          checksums(blob));
 
     } catch (StorageException e) {
       throw e;
@@ -248,12 +253,17 @@ public final class GcsStorageClient implements StorageClient {
   @Override
   public StorageObject getObject(GetObjectRequest request) {
     try {
-      BlobId id = BlobId.of(request.bucketName(), request.key());
-      Blob blob = storage.get(id);
+      Blob blob = storage.get(blobId(request.bucketName(), request.key(), request.versionId()));
       if (blob == null) {
         throw StorageException.notFound(
-            PROVIDER_ID, "Object not found: " + request.bucketName() + "/" + request.key(), null);
+            PROVIDER_ID,
+            "Object not found: "
+                + describe(request.bucketName(), request.key(), request.versionId()),
+            null);
       }
+      // Read exactly the generation the metadata describes: an unpinned reader could return a
+      // newer generation written between the two calls.
+      BlobId id = BlobId.of(request.bucketName(), request.key(), blob.getGeneration());
 
       DefaultObjectMetadata metadata =
           new DefaultObjectMetadata(
@@ -268,7 +278,8 @@ public final class GcsStorageClient implements StorageClient {
               blob.getContentEncoding(),
               blob.getCacheControl(),
               blob.getContentDisposition(),
-              blob.getContentLanguage());
+              blob.getContentLanguage(),
+              checksums(blob));
 
       ReadChannel channel = storage.reader(id);
       try {
@@ -484,6 +495,23 @@ public final class GcsStorageClient implements StorageClient {
       }
     }
     return StorageException.internal(PROVIDER_ID, message, e);
+  }
+
+  private static BlobId blobId(String bucket, String key, String versionId) {
+    if (versionId == null) return BlobId.of(bucket, key);
+    try {
+      return BlobId.of(bucket, key, Long.parseLong(versionId));
+    } catch (NumberFormatException invalid) {
+      throw new IllegalArgumentException("A GCS version is a numeric generation: " + versionId);
+    }
+  }
+
+  private static String describe(String bucket, String key, String versionId) {
+    return bucket + "/" + key + (versionId == null ? "" : "#" + versionId);
+  }
+
+  private static ObjectChecksums checksums(Blob blob) {
+    return new ObjectChecksums(blob.getCrc32c(), blob.getMd5());
   }
 
   private static Instant millisToInstant(Long millis) {
