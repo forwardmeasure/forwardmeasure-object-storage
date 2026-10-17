@@ -216,6 +216,61 @@ public final class S3StorageClient implements StorageClient {
   }
 
   @Override
+  public ListObjectsResponse listObjectVersions(ListObjectsRequest request) {
+    if (request.delimiter() != null && !request.delimiter().isBlank())
+      throw new IllegalArgumentException("Version listings do not support delimiter grouping");
+    try {
+      var builder =
+          software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest.builder()
+              .bucket(request.bucketName())
+              .prefix(request.prefix());
+      if (request.maxKeys() > 0) builder.maxKeys(request.maxKeys());
+      if (request.continuationToken() != null && !request.continuationToken().isBlank()) {
+        String[] markers = request.continuationToken().split("\\.", -1);
+        if (markers.length != 2)
+          throw new IllegalArgumentException("Invalid version listing token");
+        var decoder = java.util.Base64.getUrlDecoder();
+        builder.keyMarker(
+            new String(decoder.decode(markers[0]), java.nio.charset.StandardCharsets.UTF_8));
+        String versionMarker =
+            new String(decoder.decode(markers[1]), java.nio.charset.StandardCharsets.UTF_8);
+        if (!versionMarker.isEmpty()) builder.versionIdMarker(versionMarker);
+      }
+      var page = s3.listObjectVersions(builder.build());
+      List<ObjectInfo> objects = new ArrayList<>();
+      for (var version : page.versions()) {
+        objects.add(
+            new ObjectInfo(
+                request.bucketName(),
+                version.key(),
+                version.size() == null ? 0L : version.size(),
+                version.lastModified(),
+                version.eTag(),
+                version.versionId(),
+                version.storageClassAsString(),
+                Map.of(),
+                Map.of()));
+      }
+      String next = null;
+      if (Boolean.TRUE.equals(page.isTruncated())) {
+        if (page.nextKeyMarker() == null)
+          throw new IllegalStateException("Truncated version listing has no next key marker");
+        var encoder = java.util.Base64.getUrlEncoder().withoutPadding();
+        next =
+            encoder.encodeToString(
+                    page.nextKeyMarker().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                + "."
+                + encoder.encodeToString(
+                    java.util.Objects.toString(page.nextVersionIdMarker(), "")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      }
+      return new ListObjectsResponse(objects, next, next != null);
+    } catch (Exception e) {
+      throw mapException("Failed to list object versions: " + request.bucketName(), e);
+    }
+  }
+
+  @Override
   public ObjectInfo headObject(HeadObjectRequest request) {
     try {
       HeadObjectResponse r =
@@ -343,6 +398,7 @@ public final class S3StorageClient implements StorageClient {
           software.amazon.awssdk.services.s3.model.DeleteObjectRequest.builder()
               .bucket(request.bucketName())
               .key(request.key())
+              .versionId(request.versionId())
               .build());
     } catch (NoSuchBucketException | NoSuchKeyException e) {
       // idempotent

@@ -163,6 +163,43 @@ class S3StorageClientIntegrationTest {
         assertEquals(crc32c(first), pinned.metadata().checksums().crc32c());
         assertArrayEquals(first, pinned.content().readAllBytes());
       }
+      var listed = new java.util.ArrayList<com.forwardmeasure.objectstorage.ObjectInfo>();
+      String token = null;
+      do {
+        var page =
+            storage.listObjectVersions(
+                new StorageClient.ListObjectsRequest(bucket, key, null, 1, token));
+        listed.addAll(page.objects());
+        token = page.nextContinuationToken();
+      } while (token != null);
+      assertEquals(
+          java.util.Set.of(firstVersion, live.versionId()),
+          listed.stream()
+              .map(com.forwardmeasure.objectstorage.ObjectInfo::versionId)
+              .collect(java.util.stream.Collectors.toSet()));
+      storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, key, firstVersion));
+      storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, key, firstVersion));
+      assertThrows(
+          StorageException.class,
+          () -> storage.headObject(new StorageClient.HeadObjectRequest(bucket, key, firstVersion)));
+      assertThrows(
+          StorageException.class,
+          () ->
+              storage.getObject(
+                  StorageClient.GetObjectRequest.ofVersion(bucket, key, firstVersion)));
+      var versions =
+          ((software.amazon.awssdk.services.s3.S3Client) storage.unwrap())
+              .listObjectVersions(b -> b.bucket(bucket).prefix(key));
+      assertEquals(1, versions.versions().size());
+      assertEquals(live.versionId(), versions.versions().getFirst().versionId());
+      assertTrue(
+          versions.deleteMarkers().isEmpty(), "Exact deletion must not create a delete marker");
+      assertEquals(
+          live.versionId(),
+          storage.headObject(new StorageClient.HeadObjectRequest(bucket, key)).versionId());
+      try (var replacement = storage.getObject(StorageClient.GetObjectRequest.of(bucket, key))) {
+        assertArrayEquals(second, replacement.content().readAllBytes());
+      }
     }
   }
 

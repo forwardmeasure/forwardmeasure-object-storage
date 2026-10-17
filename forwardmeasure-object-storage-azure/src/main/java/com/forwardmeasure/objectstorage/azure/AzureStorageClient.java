@@ -30,6 +30,7 @@ import com.azure.storage.blob.models.BlobRequestConditions;
 import com.azure.storage.blob.models.BlobStorageException;
 import com.azure.storage.blob.models.ListBlobsOptions;
 import com.azure.storage.blob.options.BlobInputStreamOptions;
+import com.azure.storage.blob.options.BlobParallelUploadOptions;
 import com.azure.storage.blob.sas.BlobSasPermission;
 import com.azure.storage.blob.sas.BlobServiceSasSignatureValues;
 import com.azure.storage.common.StorageSharedKeyCredential;
@@ -160,6 +161,17 @@ public final class AzureStorageClient implements StorageClient {
 
   @Override
   public ListObjectsResponse listObjects(ListObjectsRequest request) {
+    return listObjects(request, false);
+  }
+
+  @Override
+  public ListObjectsResponse listObjectVersions(ListObjectsRequest request) {
+    if (request.delimiter() != null && !request.delimiter().isBlank())
+      throw new IllegalArgumentException("Version listings do not support delimiter grouping");
+    return listObjects(request, true);
+  }
+
+  private ListObjectsResponse listObjects(ListObjectsRequest request, boolean versions) {
     try {
       BlobContainerClient container = container(request.bucketName());
       if (!container.exists()) {
@@ -168,6 +180,11 @@ public final class AzureStorageClient implements StorageClient {
       }
 
       ListBlobsOptions options = new ListBlobsOptions();
+      if (versions)
+        options.setDetails(
+            new com.azure.storage.blob.models.BlobListDetails()
+                .setRetrieveVersions(true)
+                .setRetrieveMetadata(true));
       if (request.prefix() != null && !request.prefix().isBlank()) {
         options.setPrefix(request.prefix());
       }
@@ -195,7 +212,16 @@ public final class AzureStorageClient implements StorageClient {
         if (Boolean.TRUE.equals(blob.isPrefix())) {
           continue;
         }
-        BlobProperties p = container.getBlobClient(blob.getName()).getProperties();
+        var listedBlob = container.getBlobClient(blob.getName());
+        if (versions && blob.getVersionId() != null)
+          listedBlob = listedBlob.getVersionClient(blob.getVersionId());
+        BlobProperties p;
+        try {
+          p = listedBlob.getProperties();
+        } catch (BlobStorageException removed) {
+          if (removed.getStatusCode() == 404) continue;
+          throw removed;
+        }
         out.add(
             new ObjectInfo(
                 request.bucketName(),
@@ -203,7 +229,7 @@ public final class AzureStorageClient implements StorageClient {
                 p.getBlobSize(),
                 p.getLastModified() == null ? null : p.getLastModified().toInstant(),
                 p.getETag(),
-                null,
+                versions ? p.getVersionId() : null,
                 null,
                 p.getMetadata() == null ? Map.of() : Map.copyOf(p.getMetadata()),
                 Map.of()));
@@ -319,41 +345,67 @@ public final class AzureStorageClient implements StorageClient {
       Map<String, String> metadata =
           request.userMetadata() == null ? Map.of() : request.userMetadata();
 
-      // The MD5 is computed as the content streams up: Azure stores one only for single-request
-      // uploads, and setting HTTP headers afterwards replaces every header, the MD5 included.
-      java.security.MessageDigest md5 = java.security.MessageDigest.getInstance("MD5");
-      if (request.bytes() != null) {
-        try (InputStream in =
-            new java.security.DigestInputStream(new ByteArrayInputStream(request.bytes()), md5)) {
-          blob.upload(in, request.bytes().length, true); // overwrite=true
+      // Commit bytes, headers and ownership metadata together. Post-upload header/metadata writes
+      // create extra content-bearing versions on versioned Azure accounts, outside the returned
+      // locator and therefore outside exact-version cleanup.
+      {
+        InputStream content;
+        long length;
+        if (request.bytes() != null) {
+          headers.setContentMd5(
+              java.security.MessageDigest.getInstance("MD5").digest(request.bytes()));
+          content = new ByteArrayInputStream(request.bytes());
+          length = request.bytes().length;
+        } else if (request.stream() != null) {
+          // The SDK consumes this stream once, buffers retryable blocks, then commits the block
+          // list with these headers. Finalize the whole-object MD5 at EOF, before that commit.
+          // The protocol fixture covers both single-PUT and multi-block uploads: changing headers
+          // afterwards would create another content version and is deliberately forbidden.
+          content = new UploadStream(request.stream(), request.contentLength(), headers);
+          length = request.contentLength();
+        } else {
+          java.nio.file.Path path = request.filePath();
+          if (path == null)
+            throw new IllegalArgumentException(
+                "Exactly one of filePath, bytes, or stream must be provided");
+          var digest = java.security.MessageDigest.getInstance("MD5");
+          try (var in =
+              new java.security.DigestInputStream(
+                  java.nio.file.Files.newInputStream(path), digest)) {
+            in.transferTo(java.io.OutputStream.nullOutputStream());
+          }
+          headers.setContentMd5(digest.digest());
+          length = java.nio.file.Files.size(path);
+          content = java.nio.file.Files.newInputStream(path);
         }
-      } else if (request.stream() != null) {
-        blob.upload(
-            new java.security.DigestInputStream(request.stream(), md5),
-            request.contentLength(),
-            true); // overwrite=true
-      } else if (request.filePath() != null) {
-        try (InputStream in =
-            new java.security.DigestInputStream(
-                java.nio.file.Files.newInputStream(request.filePath()), md5)) {
-          blob.upload(in, java.nio.file.Files.size(request.filePath()), true); // overwrite=true
+        try (content) {
+          var uploaded =
+              blob.uploadWithResponse(
+                      new BlobParallelUploadOptions(content)
+                          .setParallelTransferOptions(
+                              new com.azure.storage.blob.models.ParallelTransferOptions()
+                                  .setBlockSizeLong(
+                                      Math.max(
+                                          4L * 1024 * 1024,
+                                          length == 0
+                                              ? 0
+                                              : 1
+                                                  + (length - 1)
+                                                      / com.azure.storage.blob.specialized
+                                                          .BlockBlobClient.MAX_BLOCKS))
+                                  .setMaxSingleUploadSizeLong(4L * 1024 * 1024)
+                                  .setMaxConcurrency(2))
+                          .setComputeMd5(true)
+                          .setHeaders(headers)
+                          .setMetadata(metadata),
+                      null,
+                      com.azure.core.util.Context.NONE)
+                  .getValue();
+          // Use this write's response; a subsequent HEAD might describe a concurrent replacement.
+          return new PutObjectResult(
+              request.bucketName(), request.key(), uploaded.getETag(), uploaded.getVersionId());
         }
-      } else {
-        throw new IllegalArgumentException(
-            "Exactly one of filePath, bytes, or stream must be provided");
       }
-
-      // Apply headers + metadata AFTER upload (SDK limitation)
-      headers.setContentMd5(md5.digest());
-      blob.setHttpHeaders(headers);
-      if (!metadata.isEmpty()) {
-        blob.setMetadata(metadata);
-      }
-
-      BlobProperties p = blob.getProperties();
-
-      return new PutObjectResult(
-          request.bucketName(), request.key(), p.getETag(), p.getVersionId());
 
     } catch (StorageException e) {
       throw e;
@@ -365,10 +417,68 @@ public final class AzureStorageClient implements StorageClient {
     }
   }
 
+  /** One forward pass over a caller-owned stream; no plaintext staging or ownership transfer. */
+  private static final class UploadStream extends java.io.FilterInputStream {
+    private final long length;
+    private final BlobHttpHeaders headers;
+    private final java.security.MessageDigest digest;
+    private long count;
+    private boolean complete;
+
+    private UploadStream(InputStream input, long length, BlobHttpHeaders headers)
+        throws java.security.NoSuchAlgorithmException {
+      super(input);
+      this.length = length;
+      this.headers = headers;
+      this.digest = java.security.MessageDigest.getInstance("MD5");
+    }
+
+    @Override
+    public int read() throws java.io.IOException {
+      byte[] one = new byte[1];
+      return read(one, 0, 1) == -1 ? -1 : one[0] & 0xff;
+    }
+
+    @Override
+    public int read(byte[] bytes, int offset, int requested) throws java.io.IOException {
+      java.util.Objects.checkFromIndexSize(offset, requested, bytes.length);
+      if (requested == 0) return 0;
+      if (complete) return -1;
+      if (count == length) {
+        if (in.read() != -1)
+          throw new java.io.IOException("Upload stream exceeds its declared length");
+        headers.setContentMd5(digest.digest());
+        complete = true;
+        return -1;
+      }
+      int received = in.read(bytes, offset, (int) Math.min(requested, length - count));
+      if (received < 0)
+        throw new java.io.IOException("Upload stream is shorter than its declared length");
+      digest.update(bytes, offset, received);
+      count += received;
+      return received;
+    }
+
+    @Override
+    public boolean markSupported() {
+      return false;
+    }
+
+    @Override
+    public void reset() throws java.io.IOException {
+      throw new java.io.IOException("Upload streams cannot be replayed");
+    }
+
+    @Override
+    public void close() {
+      // The caller retains ownership on success and failure.
+    }
+  }
+
   @Override
   public void deleteObject(DeleteObjectRequest request) {
     try {
-      blob(request.bucketName(), request.key()).deleteIfExists();
+      blob(request.bucketName(), request.key(), request.versionId()).deleteIfExists();
     } catch (BlobStorageException e) {
       throw mapException(
           "Failed to delete object: " + request.bucketName() + "/" + request.key(), e);

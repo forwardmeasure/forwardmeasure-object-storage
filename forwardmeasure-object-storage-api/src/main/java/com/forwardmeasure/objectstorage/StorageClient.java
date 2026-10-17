@@ -58,6 +58,16 @@ public interface StorageClient extends AutoCloseable {
 
   ListObjectsResponse listObjects(ListObjectsRequest request) throws StorageException;
 
+  /**
+   * Lists content-bearing versions, including noncurrent versions, one bounded page at a time.
+   * Delete markers are omitted. The continuation token is opaque and provider-specific; delimiter
+   * grouping is not supported. Implementations must not substitute a current-only listing.
+   */
+  default ListObjectsResponse listObjectVersions(ListObjectsRequest request)
+      throws StorageException {
+    throw new UnsupportedOperationException("This storage provider cannot list object versions");
+  }
+
   ObjectInfo headObject(HeadObjectRequest request) throws StorageException;
 
   StorageObject getObject(GetObjectRequest request) throws StorageException;
@@ -265,8 +275,18 @@ public interface StorageClient extends AutoCloseable {
 
   record PutObjectResult(String bucketName, String key, String etag, String versionId) {}
 
-  record DeleteObjectRequest(String bucketName, String key) {
+  /**
+   * An exact version/generation is required for durable cleanup of a previously recorded object.
+   */
+  record DeleteObjectRequest(String bucketName, String key, String versionId) {
+    public DeleteObjectRequest(String bucketName, String key) {
+      this(bucketName, key, null);
+    }
+
     public DeleteObjectRequest {
+      if (versionId != null && versionId.isBlank()) {
+        throw new IllegalArgumentException("versionId must not be blank");
+      }
       if (bucketName == null || bucketName.isBlank()) {
         throw new IllegalArgumentException("bucketName is required");
       }

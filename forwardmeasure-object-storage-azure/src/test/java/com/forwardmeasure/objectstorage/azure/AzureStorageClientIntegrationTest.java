@@ -253,6 +253,255 @@ class AzureStorageClientIntegrationTest {
     }
   }
 
+  private record UploadCommit(String query, String owner, String md5) {}
+
+  /**
+   * Azurite proves the write protocol; Azure version retention is checked by the opt-in account
+   * fixture.
+   */
+  @Test
+  void bytesFilesAndBorrowedStreamsCommitHeadersAndOwnershipWithoutExtraMutationRequests()
+      throws Exception {
+    try (var azurite = azurite()) {
+      azurite.start();
+      var commits = new java.util.concurrent.CopyOnWriteArrayList<UploadCommit>();
+      var loops = new io.netty.channel.nio.NioEventLoopGroup(2);
+      var sdk =
+          new com.azure.storage.blob.BlobServiceClientBuilder()
+              .endpoint(configuration(azurite).endpoint().orElseThrow() + "/" + ACCOUNT)
+              .credential(new com.azure.storage.common.StorageSharedKeyCredential(ACCOUNT, KEY))
+              .httpClient(
+                  new com.azure.core.http.netty.NettyAsyncHttpClientBuilder()
+                      .eventLoopGroup(loops)
+                      .build())
+              .addPolicy(
+                  new com.azure.core.http.policy.HttpPipelinePolicy() {
+                    @Override
+                    public reactor.core.publisher.Mono<com.azure.core.http.HttpResponse> process(
+                        com.azure.core.http.HttpPipelineCallContext context,
+                        com.azure.core.http.HttpPipelineNextPolicy next) {
+                      var request = context.getHttpRequest();
+                      if (request.getHttpMethod() == com.azure.core.http.HttpMethod.PUT
+                          && request.getUrl().getPath().contains("/atomic-"))
+                        commits.add(
+                            new UploadCommit(
+                                request.getUrl().getQuery(),
+                                request.getHeaders().getValue("x-ms-meta-owner"),
+                                request.getHeaders().getValue("x-ms-blob-content-md5")));
+                      return next.process();
+                    }
+                  })
+              .buildClient();
+      try (var storage = new AzureStorageClient(sdk, loops)) {
+        String bucket = "atomic-archive-upload";
+        storage.createBucket(new StorageClient.CreateBucketRequest(bucket, null, null));
+        var file = java.nio.file.Files.createTempFile("azure-atomic-upload", ".txt");
+        try {
+          for (int length : new int[] {0, 23, 8 * 1024 * 1024 + 17}) {
+            byte[] bytes = new byte[length];
+            new java.util.Random(42).nextBytes(bytes);
+            java.nio.file.Files.write(file, bytes);
+            for (int source = 0; source < 3; source++) {
+              commits.clear();
+              String key = "atomic-" + source;
+              var closed = new java.util.concurrent.atomic.AtomicBoolean();
+              var borrowed =
+                  new java.io.ByteArrayInputStream(bytes) {
+                    @Override
+                    public void close() throws java.io.IOException {
+                      closed.set(true);
+                      super.close();
+                    }
+                  };
+              var request =
+                  switch (source) {
+                    case 0 ->
+                        StorageClient.PutObjectRequest.fromBytes(
+                            bucket,
+                            key,
+                            bytes,
+                            "application/gzip",
+                            Map.of("owner", "archive-operation"));
+                    case 1 ->
+                        StorageClient.PutObjectRequest.fromPath(
+                            bucket,
+                            key,
+                            file,
+                            "application/gzip",
+                            Map.of("owner", "archive-operation"));
+                    default ->
+                        StorageClient.PutObjectRequest.fromStream(
+                            bucket,
+                            key,
+                            borrowed,
+                            bytes.length,
+                            "application/gzip",
+                            Map.of("owner", "archive-operation"));
+                  };
+              var receipt = storage.putObject(request);
+              assertFalse(closed.get(), "The adapter borrows caller streams");
+              var contentCommits =
+                  commits.stream()
+                      .filter(
+                          value ->
+                              value.query() == null || value.query().contains("comp=blocklist"))
+                      .toList();
+              assertEquals(1, contentCommits.size(), commits.toString());
+              assertFalse(
+                  commits.stream()
+                      .anyMatch(
+                          value ->
+                              value.query() != null
+                                  && (value.query().contains("comp=metadata")
+                                      || value.query().contains("comp=properties"))),
+                  commits.toString());
+              var commit = contentCommits.getFirst();
+              assertEquals("archive-operation", commit.owner());
+              if (length > 4 * 1024 * 1024)
+                assertTrue(commit.query().contains("comp=blocklist"), commits.toString());
+              assertEquals(
+                  java.util.Base64.getEncoder()
+                      .encodeToString(java.security.MessageDigest.getInstance("MD5").digest(bytes)),
+                  commit.md5());
+              var head = storage.headObject(new StorageClient.HeadObjectRequest(bucket, key));
+              assertEquals(receipt.etag(), head.contentTag());
+              assertEquals("archive-operation", head.userMetadata().get("owner"));
+              assertEquals(commit.md5(), head.checksums().md5());
+              try (var read = storage.getObject(StorageClient.GetObjectRequest.of(bucket, key))) {
+                assertArrayEquals(bytes, read.content().readAllBytes());
+              }
+            }
+          }
+          for (long declared : new long[] {2, 4}) {
+            commits.clear();
+            var closed = new java.util.concurrent.atomic.AtomicBoolean();
+            var borrowed =
+                new java.io.ByteArrayInputStream(new byte[] {1, 2, 3}) {
+                  @Override
+                  public void close() {
+                    closed.set(true);
+                  }
+                };
+            String invalidKey = "atomic-invalid-" + declared;
+            assertThrows(
+                StorageException.class,
+                () ->
+                    storage.putObject(
+                        StorageClient.PutObjectRequest.fromStream(
+                            bucket,
+                            invalidKey,
+                            borrowed,
+                            declared,
+                            "application/gzip",
+                            Map.of("owner", "invalid"))));
+            assertFalse(closed.get(), "Invalid uploads also retain caller stream ownership");
+            assertFalse(
+                commits.stream()
+                    .anyMatch(
+                        value -> value.query() == null || value.query().contains("comp=blocklist")),
+                commits.toString());
+            assertThrows(
+                StorageException.class,
+                () -> storage.headObject(new StorageClient.HeadObjectRequest(bucket, invalidKey)));
+          }
+        } finally {
+          java.nio.file.Files.deleteIfExists(file);
+        }
+      }
+    }
+  }
+
+  /**
+   * Requires a disposable real Azure account with blob versioning enabled and soft delete disabled.
+   */
+  @Test
+  @org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable(
+      named = "FORWARDMEASURE_AZURE_VERSIONED_TESTS",
+      matches = "true")
+  void exactVersionCleanupRemovesTheOnlyContentVersionAndPreservesAnOverwrittenReplacement() {
+    var loops = new io.netty.channel.nio.NioEventLoopGroup(2);
+    var sdk =
+        new com.azure.storage.blob.BlobServiceClientBuilder()
+            .endpoint(
+                java.util.Objects.requireNonNull(
+                    System.getenv("FORWARDMEASURE_AZURE_TEST_ENDPOINT")))
+            .credential(
+                new com.azure.storage.common.StorageSharedKeyCredential(
+                    java.util.Objects.requireNonNull(
+                        System.getenv("FORWARDMEASURE_AZURE_TEST_ACCOUNT")),
+                    java.util.Objects.requireNonNull(
+                        System.getenv("FORWARDMEASURE_AZURE_TEST_ACCOUNT_KEY"))))
+            .httpClient(
+                new com.azure.core.http.netty.NettyAsyncHttpClientBuilder()
+                    .eventLoopGroup(loops)
+                    .build())
+            .buildClient();
+    String bucket = "archive-version-" + java.util.UUID.randomUUID();
+    var container = sdk.getBlobContainerClient(bucket);
+    container.create();
+    try (var storage = new AzureStorageClient(sdk, loops)) {
+      var options =
+          new com.azure.storage.blob.models.ListBlobsOptions()
+              .setDetails(
+                  new com.azure.storage.blob.models.BlobListDetails()
+                      .setRetrieveVersions(true)
+                      .setRetrieveDeletedBlobs(true)
+                      .setRetrieveDeletedBlobsWithVersions(true));
+      var first =
+          storage.putObject(
+              StorageClient.PutObjectRequest.fromBytes(
+                  bucket,
+                  "part",
+                  new byte[] {1, 2, 3},
+                  "application/gzip",
+                  Map.of("owner", "original")));
+      assertTrue(
+          first.versionId() != null && !first.versionId().isBlank(),
+          "The selected account must have versioning enabled");
+      assertEquals(1, container.listBlobs(options, null).stream().count());
+      var replacement =
+          storage.putObject(
+              StorageClient.PutObjectRequest.fromBytes(
+                  bucket,
+                  "part",
+                  new byte[] {4, 5, 6},
+                  "application/gzip",
+                  Map.of("owner", "replacement")));
+      assertEquals(2, container.listBlobs(options, null).stream().count());
+      var listed = new java.util.ArrayList<com.forwardmeasure.objectstorage.ObjectInfo>();
+      String token = null;
+      do {
+        var page =
+            storage.listObjectVersions(
+                new StorageClient.ListObjectsRequest(bucket, "part", null, 1, token));
+        listed.addAll(page.objects());
+        token = page.nextContinuationToken();
+      } while (token != null);
+      assertEquals(
+          java.util.Set.of(first.versionId(), replacement.versionId()),
+          listed.stream()
+              .map(com.forwardmeasure.objectstorage.ObjectInfo::versionId)
+              .collect(java.util.stream.Collectors.toSet()));
+      storage.deleteObject(
+          new StorageClient.DeleteObjectRequest(bucket, "part", first.versionId()));
+      var remaining = container.listBlobs(options, null).stream().toList();
+      assertEquals(1, remaining.size());
+      assertEquals(replacement.versionId(), remaining.getFirst().getVersionId());
+      assertFalse(container.getBlobClient("part").getVersionClient(first.versionId()).exists());
+      assertTrue(
+          container.getBlobClient("part").getVersionClient(replacement.versionId()).exists());
+      storage.deleteObject(
+          new StorageClient.DeleteObjectRequest(bucket, "part", replacement.versionId()));
+      assertEquals(
+          0,
+          container.listBlobs(options, null).stream().count(),
+          "Exact cleanup must also remove the sole current version and leave no soft-deleted"
+              + " bytes");
+    } finally {
+      container.delete();
+    }
+  }
+
   private static GenericContainer<?> azurite() {
     return new GenericContainer<>(
             DockerImageName.parse("mcr.microsoft.com/azure-storage/azurite:3.36.0"))

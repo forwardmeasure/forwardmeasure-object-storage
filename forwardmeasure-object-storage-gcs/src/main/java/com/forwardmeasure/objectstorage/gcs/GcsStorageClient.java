@@ -176,8 +176,20 @@ public final class GcsStorageClient implements StorageClient {
 
   @Override
   public ListObjectsResponse listObjects(ListObjectsRequest request) {
+    return listObjects(request, false);
+  }
+
+  @Override
+  public ListObjectsResponse listObjectVersions(ListObjectsRequest request) {
+    if (request.delimiter() != null && !request.delimiter().isBlank())
+      throw new IllegalArgumentException("Version listings do not support delimiter grouping");
+    return listObjects(request, true);
+  }
+
+  private ListObjectsResponse listObjects(ListObjectsRequest request, boolean versions) {
     try {
       List<BlobListOption> options = new ArrayList<>();
+      if (versions) options.add(BlobListOption.versions(true));
 
       if (request.prefix() != null && !request.prefix().isBlank()) {
         options.add(BlobListOption.prefix(request.prefix()));
@@ -350,7 +362,7 @@ public final class GcsStorageClient implements StorageClient {
   @Override
   public void deleteObject(DeleteObjectRequest request) {
     try {
-      storage.delete(BlobId.of(request.bucketName(), request.key()));
+      storage.delete(blobId(request.bucketName(), request.key(), request.versionId()));
     } catch (Exception e) {
       if (e instanceof com.google.cloud.storage.StorageException g && g.getCode() == 404) {
         return;

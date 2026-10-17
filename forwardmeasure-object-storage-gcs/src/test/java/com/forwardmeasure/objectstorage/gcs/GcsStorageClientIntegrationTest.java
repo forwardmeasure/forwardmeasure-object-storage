@@ -188,6 +188,84 @@ class GcsStorageClientIntegrationTest {
     }
   }
 
+  @Test
+  void deletesOnlyThePinnedNoncurrentGenerationInAVersionedBucket() throws Exception {
+    int port = availablePort();
+    String endpoint = "http://localhost:" + port;
+    Path credentials = serviceAccountCredentials();
+    try (var emulator = fakeGcs(port, endpoint)) {
+      emulator.start();
+      try (var storage = new GcsStorageClient(configuration(endpoint, credentials))) {
+        String bucket = "versioned-cleanup";
+        String key = "archive/part";
+        storage.createBucket(new StorageClient.CreateBucketRequest(bucket, null, null));
+        var nativeClient = (com.google.cloud.storage.Storage) storage.unwrap();
+        nativeClient.update(
+            com.google.cloud.storage.BucketInfo.newBuilder(bucket)
+                .setVersioningEnabled(true)
+                .build());
+        assertTrue(nativeClient.get(bucket).versioningEnabled(), "The fixture requires versioning");
+        byte[] original = new byte[] {1, 2, 3};
+        byte[] replacement = new byte[] {4, 5, 6};
+        var first =
+            storage.putObject(
+                StorageClient.PutObjectRequest.fromBytes(
+                    bucket, key, original, "application/gzip", Map.of("owner", "original")));
+        var second =
+            storage.putObject(
+                StorageClient.PutObjectRequest.fromBytes(
+                    bucket, key, replacement, "application/gzip", Map.of("owner", "replacement")));
+        try (var old =
+            storage.getObject(
+                StorageClient.GetObjectRequest.ofVersion(bucket, key, first.versionId()))) {
+          assertArrayEquals(original, old.content().readAllBytes());
+        }
+        var before =
+            storage.listObjectVersions(
+                new StorageClient.ListObjectsRequest(bucket, key, null, 100, null));
+        assertEquals(
+            java.util.Set.of(first.versionId(), second.versionId()),
+            before.objects().stream()
+                .map(com.forwardmeasure.objectstorage.ObjectInfo::versionId)
+                .collect(java.util.stream.Collectors.toSet()));
+        storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, key, first.versionId()));
+        storage.deleteObject(new StorageClient.DeleteObjectRequest(bucket, key, first.versionId()));
+        assertThrows(
+            StorageException.class,
+            () ->
+                storage.headObject(
+                    new StorageClient.HeadObjectRequest(bucket, key, first.versionId())));
+        assertThrows(
+            StorageException.class,
+            () ->
+                storage.getObject(
+                    StorageClient.GetObjectRequest.ofVersion(bucket, key, first.versionId())));
+        var remaining =
+            storage.listObjectVersions(
+                new StorageClient.ListObjectsRequest(bucket, key, null, 100, null));
+        assertEquals(1, remaining.objects().size());
+        assertEquals(second.versionId(), remaining.objects().getFirst().versionId());
+        assertEquals(
+            second.versionId(),
+            storage.headObject(new StorageClient.HeadObjectRequest(bucket, key)).versionId());
+        try (var current = storage.getObject(StorageClient.GetObjectRequest.of(bucket, key))) {
+          assertArrayEquals(replacement, current.content().readAllBytes());
+        }
+        storage.deleteObject(
+            new StorageClient.DeleteObjectRequest(bucket, key, second.versionId()));
+        assertTrue(
+            storage
+                .listObjectVersions(
+                    new StorageClient.ListObjectsRequest(bucket, key, null, 100, null))
+                .objects()
+                .isEmpty());
+        storage.deleteBucket(new StorageClient.DeleteBucketRequest(bucket, false));
+      }
+    } finally {
+      Files.deleteIfExists(credentials);
+    }
+  }
+
   private static String crc32c(byte[] content) {
     var crc = new java.util.zip.CRC32C();
     crc.update(content);
