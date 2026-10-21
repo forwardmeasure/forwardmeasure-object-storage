@@ -55,6 +55,15 @@
 
   <dependencyManagement>
     <dependencies>
+            <!-- No framework module in this repo: every module is framework-neutral and takes its
+                 third-party versions from the platform libraries BOM. -->
+            <dependency>
+                <groupId>com.forwardmeasure.platform</groupId>
+                <artifactId>forwardmeasure-platform-libraries-bom</artifactId>
+                <version>${forwardmeasure.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
       <dependency>
         <groupId>com.google.cloud</groupId>
         <artifactId>libraries-bom</artifactId>
@@ -71,27 +80,27 @@
       </dependency>
 
       <dependency>
-        <groupId>${project.groupId}</groupId>
+        <groupId>com.forwardmeasure.objectstorage</groupId>
         <artifactId>forwardmeasure-object-storage-api</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>${project.groupId}</groupId>
+        <groupId>com.forwardmeasure.objectstorage</groupId>
         <artifactId>forwardmeasure-object-storage-core</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>${project.groupId}</groupId>
+        <groupId>com.forwardmeasure.objectstorage</groupId>
         <artifactId>forwardmeasure-object-storage-s3</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>${project.groupId}</groupId>
+        <groupId>com.forwardmeasure.objectstorage</groupId>
         <artifactId>forwardmeasure-object-storage-gcs</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>${project.groupId}</groupId>
+        <groupId>com.forwardmeasure.objectstorage</groupId>
         <artifactId>forwardmeasure-object-storage-azure</artifactId>
         <version>${project.version}</version>
       </dependency>
